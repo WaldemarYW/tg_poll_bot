@@ -15,11 +15,19 @@ API_TOKEN = os.getenv("TELEGRAM_API_TOKEN")
 MESSAGE_DELAY = 3
 
 
-async def send_with_delay(send_method, *args, delay: float = MESSAGE_DELAY, **kwargs):
+async def send_with_delay(
+    send_method,
+    *args,
+    delay: float = MESSAGE_DELAY,
+    skip_delay: bool = False,
+    **kwargs,
+):
     """
-    Универсальный помощник: выдерживает паузу перед отправкой любого сообщения.
+    Универсальный помощник: мгновенно отправляет первое сообщение, но добавляет
+    паузу перед повторными ответами, если skip_delay=False.
     """
-    await asyncio.sleep(delay)
+    if not skip_delay:
+        await asyncio.sleep(delay)
     return await send_method(*args, **kwargs)
 
 
@@ -47,7 +55,7 @@ def build_manager_button() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Написати Володимиру✅",
+                    text="написати Володимиру",
                     url="https://t.me/hr_volodymyr?text=%2B",
                 )
             ]
@@ -62,7 +70,8 @@ async def cmd_start(message: types.Message):
     await send_with_delay(
         message.answer,
         "Вітаю! Я бот-помічниця Оля!👩🏻‍💻\n"
-        "Я буду скидати вам новини та важливу інформацію⚡️"
+        "Я буду скидати вам новини та важливу інформацію⚡️",
+        skip_delay=True,
     )
 
     await send_with_delay(
@@ -77,14 +86,14 @@ async def cmd_poll(message: types.Message):
     """
     Обработка команды /poll
     """
-    await send_age_question(message.bot, message.chat.id)
+    await send_age_question(message.bot, message.chat.id, skip_delay=True)
 
 
 async def handle_contact_manager(callback: types.CallbackQuery):
     """
     Ответ на нажатие кнопки «Написати менеджеру»
     """
-    await send_manager_contact(callback.message)
+    await send_manager_contact(callback.message, skip_delay=True)
     await callback.answer()
 
 
@@ -92,7 +101,7 @@ async def handle_poll_callback(callback: types.CallbackQuery):
     """
     Запуск опроса по кнопке «Пройти опитування»
     """
-    await send_age_question(callback.message.bot, callback.message.chat.id)
+    await send_age_question(callback.message.bot, callback.message.chat.id, skip_delay=True)
     await callback.answer()
 
 
@@ -103,6 +112,7 @@ async def handle_age_choice(callback: types.CallbackQuery):
     await send_with_delay(
         callback.message.answer,
         "Чудово! Адже цей вид занятості підходить для будь-якого віку✨",
+        skip_delay=True,
     )
     await send_income_question(callback.message.bot, callback.message.chat.id)
     await callback.answer()
@@ -115,6 +125,7 @@ async def handle_income_choice(callback: types.CallbackQuery):
     await send_with_delay(
         callback.message.answer,
         "Це реально і легше, ніж здається!💪",
+        skip_delay=True,
     )
     await send_device_question(callback.message.bot, callback.message.chat.id)
     await callback.answer()
@@ -129,6 +140,8 @@ async def handle_device_choice(callback: types.CallbackQuery):
             callback.message.answer,
             "Дякую за інтерес до вакансії!🙌🏻 Для цієї роботи обов’язковий ноутбук чи компʼютер, "
             "тож поки ми не можемо рухатися далі.🤦🏻‍♂️"
+            ,
+            skip_delay=True,
         )
         await send_with_delay(
             callback.message.answer,
@@ -140,7 +153,8 @@ async def handle_device_choice(callback: types.CallbackQuery):
         await send_with_delay(
             callback.message.answer,
             "Це добре, бо ви самі обираєте зручний для себе темп. Але і розмір виплат буде залежати від того, "
-            "скільки часу ви приділяєте цьому💰⌛️"
+            "скільки часу ви приділяєте цьому💰⌛️",
+            skip_delay=True,
         )
 
     await send_manager_prompt(callback.message)
@@ -151,11 +165,11 @@ async def handle_manager_prompt(callback: types.CallbackQuery):
     """
     Ответ на кнопку «Так» в вопросе о подробностях
     """
-    await send_manager_contact(callback.message)
+    await send_manager_contact(callback.message, skip_delay=True)
     await callback.answer()
 
 
-async def send_age_question(bot: Bot, chat_id: int):
+async def send_age_question(bot: Bot, chat_id: int, skip_delay: bool = False):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="18-24", callback_data="poll_age:18-24")],
@@ -169,10 +183,11 @@ async def send_age_question(bot: Bot, chat_id: int):
         chat_id=chat_id,
         text="Скільки вам років?👏",
         reply_markup=keyboard,
+        skip_delay=skip_delay,
     )
 
 
-async def send_income_question(bot: Bot, chat_id: int):
+async def send_income_question(bot: Bot, chat_id: int, skip_delay: bool = False):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="10-20 тис", callback_data="poll_income:10-20")],
@@ -186,10 +201,11 @@ async def send_income_question(bot: Bot, chat_id: int):
         chat_id=chat_id,
         text="Скільки ви б хотіли отримувати на місяць?💸",
         reply_markup=keyboard,
+        skip_delay=skip_delay,
     )
 
 
-async def send_device_question(bot: Bot, chat_id: int):
+async def send_device_question(bot: Bot, chat_id: int, skip_delay: bool = False):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Так, є 👍🏻", callback_data="poll_device_yes")],
@@ -199,12 +215,13 @@ async def send_device_question(bot: Bot, chat_id: int):
     await send_with_delay(
         bot.send_message,
         chat_id=chat_id,
-        text="Чи є у вас комп'ютер чи ноутбук?💻",
+        text="Чи є у вас комп'ютер чи ноутбук?",
         reply_markup=keyboard,
+        skip_delay=skip_delay,
     )
 
 
-async def send_manager_prompt(message: types.Message):
+async def send_manager_prompt(message: types.Message, skip_delay: bool = False):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Так", callback_data="request_manager")]
@@ -214,15 +231,17 @@ async def send_manager_prompt(message: types.Message):
         message.answer,
         "Хочете вже дізнатися подробиці?👌",
         reply_markup=keyboard,
+        skip_delay=skip_delay,
     )
 
 
-async def send_manager_contact(message: types.Message):
+async def send_manager_contact(message: types.Message, skip_delay: bool = False):
     await send_with_delay(
         message.answer,
         "Надаю вам контакт менеджера Володимира - @hr_volodymyr🧑🏻‍💻 "
         "Відправ йому «+» і він розповість вам про роботу, та буде допомагати в подальшому!🚀",
         reply_markup=build_manager_button(),
+        skip_delay=skip_delay,
     )
 
 
