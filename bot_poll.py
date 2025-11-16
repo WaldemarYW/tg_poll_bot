@@ -14,6 +14,38 @@ load_dotenv()
 API_TOKEN = os.getenv("TELEGRAM_API_TOKEN")
 
 
+def build_start_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Написати менеджеру",
+                    callback_data="contact_manager"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Пройти опитування",
+                    callback_data="start_poll"
+                )
+            ]
+        ]
+    )
+
+
+def build_manager_button() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="написати Володимиру",
+                    url="https://t.me/hr_volodymyr?text=%2B",
+                )
+            ]
+        ]
+    )
+
+
 async def cmd_start(message: types.Message):
     """
     Обработка команды /start
@@ -23,27 +55,12 @@ async def cmd_start(message: types.Message):
         "Я буду скидати вам новини та важливу інформацію⚡️"
     )
 
-    start_keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Написати менеджеру👨🏻‍💻",
-                    callback_data="contact_manager"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Пройти опитування⚡️",
-                    callback_data="start_poll"
-                )
-            ]
-        ]
-    )
+    await asyncio.sleep(5)
 
     await message.answer(
         "Зараз ви можете пройти невеличке опитування чи одразу "
         "звʼязатись з менеджером, який вас введе в курс справи🙌",
-        reply_markup=start_keyboard,
+        reply_markup=build_start_keyboard(),
     )
 
 
@@ -51,31 +68,14 @@ async def cmd_poll(message: types.Message):
     """
     Обработка команды /poll
     """
-    await send_predefined_poll(message.bot, message.chat.id)
+    await send_age_question(message.bot, message.chat.id)
 
 
 async def handle_contact_manager(callback: types.CallbackQuery):
     """
     Ответ на нажатие кнопки «Написати менеджеру»
     """
-    manager_keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Написати Менеджеру👨🏻‍💻",
-                    url="https://t.me/hr_volodymyr?text=%2B",
-                )
-            ]
-        ]
-    )
-
-    await callback.message.answer(
-        "Надаю вам контакт менеджера Володимира - @hr_volodymyr🧑🏻‍💻 "
-        "Відправ йому «+» і він розповість вам про роботу, та буде допомагати "
-        "в подальшому!🚀",
-        reply_markup=manager_keyboard,
-    )
-
+    await send_manager_contact(callback.message)
     await callback.answer()
 
 
@@ -83,28 +83,120 @@ async def handle_poll_callback(callback: types.CallbackQuery):
     """
     Запуск опроса по кнопке «Пройти опитування»
     """
-    await send_predefined_poll(callback.message.bot, callback.message.chat.id)
+    await send_age_question(callback.message.bot, callback.message.chat.id)
     await callback.answer()
 
 
-async def send_predefined_poll(bot: Bot, chat_id: int):
+async def handle_age_choice(callback: types.CallbackQuery):
     """
-    Универсальный помощник по отправке предустановленного опроса
+    Обработка выбора возраста
     """
-    question = "Какой контент тебе больше всего нравится?"
-    options = [
-        "Новости",
-        "Мемы",
-        "Обучение",
-        "Всё подряд"
-    ]
+    await callback.message.answer("Чудово! Адже цей вид занятості підходить для будь-якого віку✨")
+    await send_income_question(callback.message.bot, callback.message.chat.id)
+    await callback.answer()
 
-    await bot.send_poll(
+
+async def handle_income_choice(callback: types.CallbackQuery):
+    """
+    Обработка желаемого дохода
+    """
+    await callback.message.answer("Це реально і легше, ніж здається!💪")
+    await send_device_question(callback.message.bot, callback.message.chat.id)
+    await callback.answer()
+
+
+async def handle_device_choice(callback: types.CallbackQuery):
+    """
+    Обработка ответа о наличии компьютера
+    """
+    if callback.data == "poll_device_no":
+        await callback.message.answer(
+            "Дякую за інтерес до вакансії!🙌🏻 Для цієї роботи обов’язковий ноутбук чи компʼютер, "
+            "тож поки ми не можемо рухатися далі.🤦🏻‍♂️"
+        )
+        await callback.message.answer(
+            "Проте у нашій компанії діє реферальна програма: ви можете отримати 100 $ бонусу за кожного "
+            "запрошеного друга 💰. Головне, щоб ця людина раніше не працювала у нас, після початку роботи "
+            "відпрацювала щонайменше 14 днів і за перші 30 днів заробила мінімум 200 $ балансу."
+        )
+    else:
+        await callback.message.answer(
+            "Це добре, бо ви самі обираєте зручний для себе темп. Але і розмір виплат буде залежати від того, "
+            "скільки часу ви приділяєте цьому💰⌛️"
+        )
+
+    await send_manager_prompt(callback.message)
+    await callback.answer()
+
+
+async def handle_manager_prompt(callback: types.CallbackQuery):
+    """
+    Ответ на кнопку «Так» в вопросе о подробностях
+    """
+    await send_manager_contact(callback.message)
+    await callback.answer()
+
+
+async def send_age_question(bot: Bot, chat_id: int):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="18-24", callback_data="poll_age:18-24")],
+            [InlineKeyboardButton(text="25-30", callback_data="poll_age:25-30")],
+            [InlineKeyboardButton(text="31-40", callback_data="poll_age:31-40")],
+            [InlineKeyboardButton(text="41+", callback_data="poll_age:41_plus")],
+        ]
+    )
+    await bot.send_message(
         chat_id=chat_id,
-        question=question,
-        options=options,
-        is_anonymous=False,            # видно, кто голосует
-        allows_multiple_answers=True   # можно выбрать несколько
+        text="Скільки вам років?👏",
+        reply_markup=keyboard,
+    )
+
+
+async def send_income_question(bot: Bot, chat_id: int):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="10-20 тис", callback_data="poll_income:10-20")],
+            [InlineKeyboardButton(text="20-30 тис", callback_data="poll_income:20-30")],
+            [InlineKeyboardButton(text="30-50 тис", callback_data="poll_income:30-50")],
+            [InlineKeyboardButton(text="50+ тис", callback_data="poll_income:50+")],
+        ]
+    )
+    await bot.send_message(
+        chat_id=chat_id,
+        text="Скільки ви б хотіли отримувати на місяць?💸",
+        reply_markup=keyboard,
+    )
+
+
+async def send_device_question(bot: Bot, chat_id: int):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Так, є", callback_data="poll_device_yes")],
+            [InlineKeyboardButton(text="Ні, немає", callback_data="poll_device_no")],
+        ]
+    )
+    await bot.send_message(
+        chat_id=chat_id,
+        text="Чи є у вас комп'ютер чи ноутбук?",
+        reply_markup=keyboard,
+    )
+
+
+async def send_manager_prompt(message: types.Message):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Так", callback_data="request_manager")]
+        ]
+    )
+    await message.answer("Хочете вже дізнатися подробиці?👌", reply_markup=keyboard)
+
+
+async def send_manager_contact(message: types.Message):
+    await message.answer(
+        "Надаю вам контакт менеджера Володимира - @hr_volodymyr🧑🏻‍💻 "
+        "Відправ йому «+» і він розповість вам про роботу, та буде допомагати в подальшому!🚀",
+        reply_markup=build_manager_button(),
     )
 
 
@@ -125,6 +217,12 @@ async def main():
     dp.message.register(cmd_poll, Command("poll"))
     dp.callback_query.register(handle_contact_manager, F.data == "contact_manager")
     dp.callback_query.register(handle_poll_callback, F.data == "start_poll")
+    dp.callback_query.register(handle_age_choice, F.data.startswith("poll_age:"))
+    dp.callback_query.register(handle_income_choice, F.data.startswith("poll_income:"))
+    dp.callback_query.register(
+        handle_device_choice, F.data.in_(["poll_device_yes", "poll_device_no"])
+    )
+    dp.callback_query.register(handle_manager_prompt, F.data == "request_manager")
 
     # Запуск бота
     await dp.start_polling(bot)
