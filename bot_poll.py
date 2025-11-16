@@ -488,7 +488,7 @@ async def render_ref_dashboard(message: types.Message, user: types.User, *, edit
     )
 
     group_prompt = (
-        "Оберіть групу нижче, щоб отримувати сповіщення."
+        "Натисніть кнопку нижче, щоб обрати групу для сповіщень."
         if groups
         else "Додайте бота до потрібної групи і надішліть у ній повідомлення, щоб вона з’явилась у списку."
     )
@@ -503,17 +503,46 @@ async def render_ref_dashboard(message: types.Message, user: types.User, *, edit
         group_prompt,
     ]
 
-    keyboard_rows = [
-        [InlineKeyboardButton(text=title, callback_data=f"set_group:{chat_id}")]
-        for chat_id, title in groups
-    ]
-
-    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard_rows) if keyboard_rows else None
+    reply_markup = None
+    if groups:
+        reply_markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📂 Обрати групу", callback_data="open_group_menu")]
+            ]
+        )
 
     if edit:
         await message.edit_text("\n".join(lines), reply_markup=reply_markup)
     else:
         await message.answer("\n".join(lines), reply_markup=reply_markup)
+
+
+async def render_group_menu(message: types.Message, *, edit: bool = False):
+    groups = await fetch_groups()
+
+    if not groups:
+        text = (
+            "Поки що немає жодної групи. Додайте бота до потрібного чату та "
+            "надішліть там повідомлення, щоб він з’явився у списку."
+        )
+        keyboard = [[InlineKeyboardButton(text="↩️ Назад", callback_data="close_group_menu")]]
+    else:
+        text_lines = [
+            "Оберіть групу, куди будуть надходити сповіщення про лідів:",
+            "",
+        ]
+        text = "\n".join(text_lines)
+        keyboard = [
+            [InlineKeyboardButton(text=title, callback_data=f"set_group:{chat_id}")]
+            for chat_id, title in groups
+        ]
+        keyboard.append([InlineKeyboardButton(text="↩️ Назад", callback_data="close_group_menu")])
+
+    markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    if edit:
+        await message.edit_text(text, reply_markup=markup)
+    else:
+        await message.answer(text, reply_markup=markup)
 
 
 async def cmd_start(message: types.Message):
@@ -639,6 +668,18 @@ async def handle_group_selection(callback: types.CallbackQuery):
     await callback.answer("Групу оновлено")
 
 
+async def handle_open_group_menu(callback: types.CallbackQuery):
+    await upsert_user(callback.from_user)
+    await render_group_menu(callback.message, edit=True)
+    await callback.answer()
+
+
+async def handle_close_group_menu(callback: types.CallbackQuery):
+    await upsert_user(callback.from_user)
+    await render_ref_dashboard(callback.message, callback.from_user, edit=True)
+    await callback.answer()
+
+
 async def track_group_presence(message: types.Message):
     await save_group(message.chat)
 
@@ -741,6 +782,8 @@ async def main():
     )
     dp.callback_query.register(handle_manager_prompt, F.data == "request_manager")
     dp.callback_query.register(handle_group_selection, F.data.startswith("set_group:"))
+    dp.callback_query.register(handle_open_group_menu, F.data == "open_group_menu")
+    dp.callback_query.register(handle_close_group_menu, F.data == "close_group_menu")
 
     # Запуск бота
     await dp.start_polling(bot)
