@@ -215,7 +215,7 @@ async def send_device_question(bot: Bot, chat_id: int, skip_delay: bool = False)
     await send_with_delay(
         bot.send_message,
         chat_id=chat_id,
-        text="Чи є у вас комп'ютер чи ноутбук?",
+        text="Чи є у вас комп'ютер чи ноутбук?💻",
         reply_markup=keyboard,
         skip_delay=skip_delay,
     )
