@@ -1,12 +1,13 @@
 import asyncio
 import logging
 import os
+import sqlite3
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import BaseFilter, Command, CommandStart
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from dotenv import load_dotenv
 
@@ -18,6 +19,7 @@ API_TOKEN = os.getenv("TELEGRAM_API_TOKEN")
 MESSAGE_DELAY = 1
 DB_PATH = Path(__file__).with_name("bot_data.db")
 BOT_USERNAME: Optional[str] = None
+NOTE_CREATION_STATE: Dict[int, Dict[str, Optional[str]]] = {}
 
 AGE_OPTIONS: Dict[str, str] = {
     "18-24": "18-24",
@@ -37,6 +39,11 @@ DEVICE_OPTIONS: Dict[str, str] = {
     "poll_device_yes": "Так, є",
     "poll_device_no": "Ні, немає",
 }
+
+
+class PendingNoteCreationFilter(BaseFilter):
+    async def __call__(self, message: types.Message) -> bool:
+        return message.from_user.id in NOTE_CREATION_STATE
 
 
 async def send_with_delay(
@@ -152,6 +159,35 @@ async def init_db():
             )
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                url TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS note_clicks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                note_id INTEGER NOT NULL,
+                user_id INTEGER,
+                timestamp TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        try:
+            await db.execute("ALTER TABLE referral_clicks ADD COLUMN note_id INTEGER")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            await db.execute("ALTER TABLE poll_responses ADD COLUMN note_id INTEGER")
+        except sqlite3.OperationalError:
+            pass
         await db.commit()
 
 
@@ -193,6 +229,53 @@ async def fetch_groups() -> List[Tuple[int, str]]:
             return [(row["chat_id"], row["title"]) for row in rows]
 
 
+async def fetch_notes(owner_id: int) -> List[aiosqlite.Row]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM notes WHERE owner_id = ? ORDER BY created_at DESC",
+            (owner_id,),
+        ) as cursor:
+            return await cursor.fetchall()
+
+
+async def fetch_note(note_id: int) -> Optional[aiosqlite.Row]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM notes WHERE id = ?", (note_id,)) as cursor:
+            return await cursor.fetchone()
+
+
+async def create_note(owner_id: int, title: str, url: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "INSERT INTO notes (owner_id, title, url) VALUES (?, ?, ?)",
+            (owner_id, title, url),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def delete_note(owner_id: int, note_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "DELETE FROM notes WHERE id = ? AND owner_id = ?",
+            (note_id, owner_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def count_note_clicks(note_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM note_clicks WHERE note_id = ?",
+            (note_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
+
 async def set_user_group(user_id: int, group_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -224,28 +307,52 @@ async def get_user_group(user_id: int) -> Optional[Tuple[int, str]]:
     return None
 
 
-async def record_referral_click(referrer_id: int, referred_user_id: int):
+async def record_referral_click(
+    referrer_id: int,
+    referred_user_id: int,
+    note_id: Optional[int] = None,
+):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """
-            INSERT OR IGNORE INTO referral_clicks (referrer_id, referred_user_id)
-            VALUES (?, ?)
+            INSERT OR IGNORE INTO referral_clicks (referrer_id, referred_user_id, note_id)
+            VALUES (?, ?, ?)
             """,
-            (referrer_id, referred_user_id),
+            (referrer_id, referred_user_id, note_id),
         )
         await db.commit()
 
 
-async def ensure_poll_row(user_id: int, referrer_id: Optional[int] = None):
+async def record_note_click(note_id: int, user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """
-            INSERT INTO poll_responses (user_id, referrer_id)
+            INSERT INTO note_clicks (note_id, user_id)
             VALUES (?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                referrer_id = COALESCE(poll_responses.referrer_id, excluded.referrer_id)
             """,
-            (user_id, referrer_id),
+            (note_id, user_id),
+        )
+        await db.commit()
+
+
+async def ensure_poll_row(
+    user_id: int,
+    referrer_id: Optional[int] = None,
+    note_id: Optional[int] = None,
+):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO poll_responses (user_id, referrer_id, note_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                referrer_id = COALESCE(poll_responses.referrer_id, excluded.referrer_id),
+                note_id = CASE
+                    WHEN excluded.note_id IS NOT NULL THEN excluded.note_id
+                    ELSE poll_responses.note_id
+                END
+            """,
+            (user_id, referrer_id, note_id),
         )
         await db.commit()
 
@@ -429,6 +536,19 @@ async def notify_group_about_poll(bot: Bot, user_id: int):
         f"Ноутбук: {poll_row['device'] or '—'}",
     ]
 
+    note_line = None
+    note_id = poll_row["note_id"]
+    note_row = None
+    if note_id:
+        note_row = await fetch_note(note_id)
+        if note_row:
+            note_line = f"Примітка: {note_row['title']}"
+            if note_row["url"]:
+                note_line += f" ({note_row['url']})"
+
+    if note_line:
+        lines.append(note_line)
+
     if user_row and user_row["username"]:
         lines.append(f"Профіль користувача: https://t.me/{user_row['username']}")
     else:
@@ -453,17 +573,30 @@ async def handle_referral_payload(payload: Optional[str], user: types.User):
     if not payload or not payload.startswith("ref_"):
         return
 
-    _, _, ref_id_str = payload.partition("ref_")
+    body = payload[4:]
+    note_id = None
+
+    if "_note_" in body:
+        ref_part, note_part = body.split("_note_", maxsplit=1)
+        try:
+            note_id = int(note_part)
+        except ValueError:
+            note_id = None
+    else:
+        ref_part = body
+
     try:
-        ref_id = int(ref_id_str)
+        ref_id = int(ref_part)
     except ValueError:
         return
 
     if ref_id == user.id:
         return
 
-    await record_referral_click(ref_id, user.id)
-    await ensure_poll_row(user.id, ref_id)
+    await record_referral_click(ref_id, user.id, note_id)
+    if note_id:
+        await record_note_click(note_id, user.id)
+    await ensure_poll_row(user.id, ref_id, note_id)
 
 
 async def render_ref_dashboard(message: types.Message, user: types.User, *, edit: bool = False):
@@ -503,13 +636,16 @@ async def render_ref_dashboard(message: types.Message, user: types.User, *, edit
         group_prompt,
     ]
 
-    reply_markup = None
+    buttons = []
     if groups:
-        reply_markup = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📂 Обрати групу", callback_data="open_group_menu")]
-            ]
+        buttons.append(
+            [InlineKeyboardButton(text="📂 Обрати групу", callback_data="open_group_menu")]
         )
+    buttons.append(
+        [InlineKeyboardButton(text="📝 Примітки", callback_data="open_notes_menu")]
+    )
+
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=buttons)
 
     if edit:
         await message.edit_text("\n".join(lines), reply_markup=reply_markup)
@@ -539,6 +675,86 @@ async def render_group_menu(message: types.Message, *, edit: bool = False):
         keyboard.append([InlineKeyboardButton(text="↩️ Назад", callback_data="close_group_menu")])
 
     markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    if edit:
+        await message.edit_text(text, reply_markup=markup)
+    else:
+        await message.answer(text, reply_markup=markup)
+
+
+async def render_notes_menu(
+    message: types.Message,
+    user: types.User,
+    *,
+    edit: bool = False,
+    view_note_id: Optional[int] = None,
+):
+    bot_username = await get_bot_username(message.bot)
+
+    if view_note_id:
+        note = await fetch_note(view_note_id)
+        if not note or note["owner_id"] != user.id:
+            await message.answer("Примітку не знайдено або немає доступу.")
+            return
+
+        clicks = await count_note_clicks(note["id"])
+        referral_link = (
+            f"https://t.me/{bot_username}?start=ref_{user.id}_note_{note['id']}"
+            if bot_username
+            else "—"
+        )
+        lines = [
+            f"Назва: {note['title']}",
+            f"Посилання: {note['url'] or '—'}",
+            f"Перегляди: {clicks}",
+            "",
+            f"Реф-посилання для цієї примітки:\n{referral_link}",
+        ]
+        keyboard = []
+        if note["url"]:
+            keyboard.append(
+                [InlineKeyboardButton(text="🌐 Відкрити примітку", url=note["url"])]
+            )
+        keyboard.append(
+            [InlineKeyboardButton(text="🗑 Видалити примітку", callback_data=f"delete_note:{note['id']}")]
+        )
+        keyboard.append(
+            [InlineKeyboardButton(text="↩️ Назад", callback_data="open_notes_menu")]
+        )
+        markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+        if edit:
+            await message.edit_text("\n".join(lines), reply_markup=markup)
+        else:
+            await message.answer("\n".join(lines), reply_markup=markup)
+        return
+
+    notes = await fetch_notes(user.id)
+    if not notes:
+        text = (
+            "У вас поки немає приміток. Натисніть кнопку нижче, щоб додати першу.\n"
+            "Використовуйте примітки для відстеження, де ви розміщуєте своє посилання."
+        )
+    else:
+        text_lines = [
+            "Ваші примітки:",
+            "",
+        ]
+        for note in notes[:5]:
+            clicks = await count_note_clicks(note["id"])
+            text_lines.append(f"• {note['title']} — {clicks} переходів")
+        if len(notes) > 5:
+            text_lines.append("... (перегляньте деталі через меню)")
+        text_lines.append("")
+        text_lines.append("Обери одну з приміток для подробиць.")
+        text = "\n".join(text_lines)
+
+    keyboard = [
+        [InlineKeyboardButton(text=note["title"], callback_data=f"note_view:{note['id']}")]
+        for note in notes
+    ]
+    keyboard.append([InlineKeyboardButton(text="➕ Додати примітку", callback_data="add_note")])
+    keyboard.append([InlineKeyboardButton(text="↩️ Назад", callback_data="close_notes_menu")])
+    markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+
     if edit:
         await message.edit_text(text, reply_markup=markup)
     else:
@@ -680,10 +896,88 @@ async def handle_close_group_menu(callback: types.CallbackQuery):
     await callback.answer()
 
 
+async def handle_open_notes_menu(callback: types.CallbackQuery):
+    await upsert_user(callback.from_user)
+    await render_notes_menu(callback.message, callback.from_user, edit=True)
+    await callback.answer()
+
+
+async def handle_close_notes_menu(callback: types.CallbackQuery):
+    await upsert_user(callback.from_user)
+    await render_ref_dashboard(callback.message, callback.from_user, edit=True)
+    await callback.answer()
+
+
+async def handle_note_view(callback: types.CallbackQuery):
+    await upsert_user(callback.from_user)
+    _, _, note_id_str = callback.data.partition(":")
+    try:
+        note_id = int(note_id_str)
+    except ValueError:
+        await callback.answer("Не вдалося відкрити примітку", show_alert=True)
+        return
+
+    await render_notes_menu(callback.message, callback.from_user, edit=True, view_note_id=note_id)
+    await callback.answer()
+
+
+async def handle_note_add(callback: types.CallbackQuery):
+    await upsert_user(callback.from_user)
+    NOTE_CREATION_STATE[callback.from_user.id] = {"step": "title"}
+    await callback.message.answer(
+        "Введіть назву примітки. Надішліть /cancel, щоб скасувати створення."
+    )
+    await callback.answer()
+
+
+async def handle_note_delete(callback: types.CallbackQuery):
+    await upsert_user(callback.from_user)
+    _, _, note_id_str = callback.data.partition(":")
+    try:
+        note_id = int(note_id_str)
+    except ValueError:
+        await callback.answer("Не вдалося видалити примітку", show_alert=True)
+        return
+
+    deleted = await delete_note(callback.from_user.id, note_id)
+    if deleted:
+        await callback.answer("Примітку видалено")
+        await render_notes_menu(callback.message, callback.from_user, edit=True)
+    else:
+        await callback.answer("Немає доступу або примітку вже видалено", show_alert=True)
+
+
 async def track_group_presence(message: types.Message):
     await save_group(message.chat)
 
 
+async def handle_note_input(message: types.Message):
+    state = NOTE_CREATION_STATE.get(message.from_user.id)
+    if not state:
+        return
+
+    text = (message.text or "").strip()
+    if text.startswith("/") and text.lower() != "/cancel":
+        NOTE_CREATION_STATE.pop(message.from_user.id, None)
+        return
+
+    if text.lower() == "/cancel":
+        NOTE_CREATION_STATE.pop(message.from_user.id, None)
+        await message.answer("Створення примітки скасовано.")
+        return
+
+    step = state.get("step")
+    if step == "title":
+        state["title"] = text
+        state["step"] = "url"
+        await message.answer("Тепер надішліть посилання для примітки (або '-' якщо воно не потрібне).")
+    elif step == "url":
+        title = state.get("title")
+        url = text if text != "-" else ""
+        NOTE_CREATION_STATE.pop(message.from_user.id, None)
+        note_id = await create_note(message.from_user.id, title or "Без назви", url)
+        await message.answer(f"Примітку збережено (ID: {note_id}).")
+        await render_notes_menu(message, message.from_user)
 async def send_age_question(bot: Bot, chat_id: int, skip_delay: bool = False):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -768,6 +1062,7 @@ async def main():
     dp = Dispatcher()
 
     # Регистрируем хэндлеры
+    dp.message.register(handle_note_input, PendingNoteCreationFilter())
     dp.message.register(cmd_start, CommandStart())
     dp.message.register(cmd_poll, Command("poll"))
     dp.message.register(cmd_ref, Command("ref"))
@@ -784,6 +1079,11 @@ async def main():
     dp.callback_query.register(handle_group_selection, F.data.startswith("set_group:"))
     dp.callback_query.register(handle_open_group_menu, F.data == "open_group_menu")
     dp.callback_query.register(handle_close_group_menu, F.data == "close_group_menu")
+    dp.callback_query.register(handle_open_notes_menu, F.data == "open_notes_menu")
+    dp.callback_query.register(handle_close_notes_menu, F.data == "close_notes_menu")
+    dp.callback_query.register(handle_note_view, F.data.startswith("note_view:"))
+    dp.callback_query.register(handle_note_add, F.data == "add_note")
+    dp.callback_query.register(handle_note_delete, F.data.startswith("delete_note:"))
 
     # Запуск бота
     await dp.start_polling(bot)
