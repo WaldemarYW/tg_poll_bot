@@ -11,6 +11,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import BaseFilter, Command, CommandStart
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from dotenv import load_dotenv
+from html import escape
 
 
 # Загружаем переменные из .env (файл должен лежать рядом с bot_poll.py)
@@ -720,7 +721,7 @@ async def render_ref_dashboard(message: types.Message, user: types.User, *, edit
     groups = await fetch_groups()
 
     group_line = (
-        f"Поточна група: {group_info[1]} (ID: {group_info[0]})"
+        f"Поточна група: {escape(group_info[1])} (ID: {group_info[0]})"
         if group_info
         else "Поточна група: не обрано"
     )
@@ -737,9 +738,11 @@ async def render_ref_dashboard(message: types.Message, user: types.User, *, edit
         else "Додайте бота до потрібної групи і надішліть у ній повідомлення, щоб вона з’явилась у списку."
     )
 
+    referral_link_html = f"<code>{escape(referral_link)}</code>"
+
     lines = [
         "🔗 Ваша реферальна інформація",
-        f"Посилання: {referral_link}",
+        f"Посилання: {referral_link_html}",
         group_line,
         "",
         stats_text,
@@ -750,10 +753,6 @@ async def render_ref_dashboard(message: types.Message, user: types.User, *, edit
     ]
 
     buttons = []
-    if bot_username:
-        buttons.append(
-            [InlineKeyboardButton(text="📋 Скопіювати посилання", callback_data="copy_main_ref")]
-        )
     if groups:
         buttons.append(
             [InlineKeyboardButton(text="📂 Обрати групу", callback_data="open_group_menu")]
@@ -767,10 +766,12 @@ async def render_ref_dashboard(message: types.Message, user: types.User, *, edit
 
     reply_markup = InlineKeyboardMarkup(inline_keyboard=buttons)
 
+    text = "\n".join(lines)
+
     if edit:
-        await message.edit_text("\n".join(lines), reply_markup=reply_markup)
+        await message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
     else:
-        await message.answer("\n".join(lines), reply_markup=reply_markup)
+        await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
 
 
 async def render_group_menu(message: types.Message, *, edit: bool = False):
@@ -866,28 +867,19 @@ async def render_notes_menu(
             else "—"
         )
         lines = [
-            f"Група: {group_title}",
-            f"Назва: {note['title']}",
-            f"Посилання: {note['url'] or '—'}",
+            f"Група: {escape(group_title)}",
+            f"Назва: {escape(note['title'])}",
+            f"Посилання: {escape(note['url']) if note['url'] else '—'}",
             f"Перегляди: {clicks}",
             "",
-            f"Реф-посилання для цієї примітки:\n{referral_link}",
+            f"Реф-посилання для цієї примітки:\n<code>{escape(referral_link)}</code>",
             "",
-            "Натисніть кнопку, щоб скопіювати або відкривати посилання.",
+            "Натисніть кнопку нижче, щоб відкривати або керувати приміткою.",
         ]
         keyboard = []
         if note["url"]:
             keyboard.append(
                 [InlineKeyboardButton(text="🌐 Відкрити примітку", url=note["url"])]
-            )
-        if bot_username:
-            keyboard.append(
-                [
-                    InlineKeyboardButton(
-                        text="📋 Скопіювати реф-посилання",
-                        callback_data=f"copy_note_ref:{note['id']}",
-                    )
-                ]
             )
         keyboard.append(
             [InlineKeyboardButton(text="🗑 Видалити примітку", callback_data=f"delete_note:{note['id']}")]
@@ -899,11 +891,11 @@ async def render_notes_menu(
         content = "\n".join(lines)
         if edit:
             try:
-                await message.edit_text(content, reply_markup=markup)
+                await message.edit_text(content, reply_markup=markup, parse_mode="HTML")
             except TelegramBadRequest:
-                await message.answer(content, reply_markup=markup)
+                await message.answer(content, reply_markup=markup, parse_mode="HTML")
         else:
-            await message.answer(content, reply_markup=markup)
+            await message.answer(content, reply_markup=markup, parse_mode="HTML")
         return
 
     notes = await fetch_notes(user.id, group_id, viewer_id=user.id)
@@ -919,7 +911,8 @@ async def render_notes_menu(
         ]
         for note in notes[:5]:
             clicks = await count_note_clicks(note["id"])
-            text_lines.append(f"• {note['title']} — {clicks} переходів")
+            safe_title = escape(note["title"])
+            text_lines.append(f"• {safe_title} — {clicks} переходів")
         if len(notes) > 5:
             text_lines.append("... (перегляньте деталі через меню)")
         text_lines.append("")
@@ -1159,27 +1152,11 @@ async def handle_note_delete(callback: types.CallbackQuery):
 
 
 async def handle_copy_main_ref(callback: types.CallbackQuery):
-    bot_username = await get_bot_username(callback.message.bot)
-    ref_link = f"https://t.me/{bot_username}?start=ref_{callback.from_user.id}"
-    await callback.answer(f"Посилання скопійовано:\n{ref_link}", show_alert=True)
+    await callback.answer()
 
 
 async def handle_copy_note_ref(callback: types.CallbackQuery):
-    bot_username = await get_bot_username(callback.message.bot)
-    _, _, note_id_str = callback.data.partition(":")
-    try:
-        note_id = int(note_id_str)
-    except ValueError:
-        await callback.answer("Не вдалося сформувати посилання", show_alert=True)
-        return
-
-    note = await fetch_note(note_id)
-    if not note or note["owner_id"] != callback.from_user.id:
-        await callback.answer("Немає доступу до цієї примітки", show_alert=True)
-        return
-
-    ref_link = f"https://t.me/{bot_username}?start=ref_{callback.from_user.id}_note_{note_id}"
-    await callback.answer(f"Посилання для примітки:\n{ref_link}", show_alert=True)
+    await callback.answer()
 
 
 async def handle_open_reminder_settings(callback: types.CallbackQuery):
@@ -1376,8 +1353,6 @@ async def main():
     dp.callback_query.register(handle_note_view, F.data.startswith("note_view:"))
     dp.callback_query.register(handle_note_add, F.data == "add_note")
     dp.callback_query.register(handle_note_delete, F.data.startswith("delete_note:"))
-    dp.callback_query.register(handle_copy_main_ref, F.data == "copy_main_ref")
-    dp.callback_query.register(handle_copy_note_ref, F.data.startswith("copy_note_ref:"))
     dp.callback_query.register(handle_open_reminder_settings, F.data == "open_reminder_settings")
     dp.callback_query.register(handle_close_reminder_settings, F.data == "close_reminder_settings")
     dp.callback_query.register(handle_edit_reminder_text, F.data == "edit_reminder_text")
