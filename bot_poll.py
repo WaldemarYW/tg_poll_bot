@@ -12,6 +12,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 API_TOKEN = os.getenv("TELEGRAM_API_TOKEN")
+MESSAGE_DELAY = 3
+
+
+async def send_with_delay(send_method, *args, delay: float = MESSAGE_DELAY, **kwargs):
+    """
+    Универсальный помощник: выдерживает паузу перед отправкой любого сообщения.
+    """
+    await asyncio.sleep(delay)
+    return await send_method(*args, **kwargs)
 
 
 def build_start_keyboard() -> InlineKeyboardMarkup:
@@ -38,7 +47,7 @@ def build_manager_button() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="написати Володимиру",
+                    text="Написати Володимиру✅",
                     url="https://t.me/hr_volodymyr?text=%2B",
                 )
             ]
@@ -50,14 +59,14 @@ async def cmd_start(message: types.Message):
     """
     Обработка команды /start
     """
-    await message.answer(
+    await send_with_delay(
+        message.answer,
         "Вітаю! Я бот-помічниця Оля!👩🏻‍💻\n"
         "Я буду скидати вам новини та важливу інформацію⚡️"
     )
 
-    await asyncio.sleep(5)
-
-    await message.answer(
+    await send_with_delay(
+        message.answer,
         "Зараз ви можете пройти невеличке опитування чи одразу "
         "звʼязатись з менеджером, який вас введе в курс справи🙌",
         reply_markup=build_start_keyboard(),
@@ -91,7 +100,10 @@ async def handle_age_choice(callback: types.CallbackQuery):
     """
     Обработка выбора возраста
     """
-    await callback.message.answer("Чудово! Адже цей вид занятості підходить для будь-якого віку✨")
+    await send_with_delay(
+        callback.message.answer,
+        "Чудово! Адже цей вид занятості підходить для будь-якого віку✨",
+    )
     await send_income_question(callback.message.bot, callback.message.chat.id)
     await callback.answer()
 
@@ -100,7 +112,10 @@ async def handle_income_choice(callback: types.CallbackQuery):
     """
     Обработка желаемого дохода
     """
-    await callback.message.answer("Це реально і легше, ніж здається!💪")
+    await send_with_delay(
+        callback.message.answer,
+        "Це реально і легше, ніж здається!💪",
+    )
     await send_device_question(callback.message.bot, callback.message.chat.id)
     await callback.answer()
 
@@ -110,17 +125,20 @@ async def handle_device_choice(callback: types.CallbackQuery):
     Обработка ответа о наличии компьютера
     """
     if callback.data == "poll_device_no":
-        await callback.message.answer(
+        await send_with_delay(
+            callback.message.answer,
             "Дякую за інтерес до вакансії!🙌🏻 Для цієї роботи обов’язковий ноутбук чи компʼютер, "
             "тож поки ми не можемо рухатися далі.🤦🏻‍♂️"
         )
-        await callback.message.answer(
+        await send_with_delay(
+            callback.message.answer,
             "Проте у нашій компанії діє реферальна програма: ви можете отримати 100 $ бонусу за кожного "
             "запрошеного друга 💰. Головне, щоб ця людина раніше не працювала у нас, після початку роботи "
             "відпрацювала щонайменше 14 днів і за перші 30 днів заробила мінімум 200 $ балансу."
         )
     else:
-        await callback.message.answer(
+        await send_with_delay(
+            callback.message.answer,
             "Це добре, бо ви самі обираєте зручний для себе темп. Але і розмір виплат буде залежати від того, "
             "скільки часу ви приділяєте цьому💰⌛️"
         )
@@ -146,7 +164,8 @@ async def send_age_question(bot: Bot, chat_id: int):
             [InlineKeyboardButton(text="41+", callback_data="poll_age:41_plus")],
         ]
     )
-    await bot.send_message(
+    await send_with_delay(
+        bot.send_message,
         chat_id=chat_id,
         text="Скільки вам років?👏",
         reply_markup=keyboard,
@@ -162,7 +181,8 @@ async def send_income_question(bot: Bot, chat_id: int):
             [InlineKeyboardButton(text="50+ тис", callback_data="poll_income:50+")],
         ]
     )
-    await bot.send_message(
+    await send_with_delay(
+        bot.send_message,
         chat_id=chat_id,
         text="Скільки ви б хотіли отримувати на місяць?💸",
         reply_markup=keyboard,
@@ -172,13 +192,14 @@ async def send_income_question(bot: Bot, chat_id: int):
 async def send_device_question(bot: Bot, chat_id: int):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Так, є", callback_data="poll_device_yes")],
-            [InlineKeyboardButton(text="Ні, немає", callback_data="poll_device_no")],
+            [InlineKeyboardButton(text="Так, є 👍🏻", callback_data="poll_device_yes")],
+            [InlineKeyboardButton(text="Ні, немає 🙅🏻‍♂️", callback_data="poll_device_no")],
         ]
     )
-    await bot.send_message(
+    await send_with_delay(
+        bot.send_message,
         chat_id=chat_id,
-        text="Чи є у вас комп'ютер чи ноутбук?",
+        text="Чи є у вас комп'ютер чи ноутбук?💻",
         reply_markup=keyboard,
     )
 
@@ -189,11 +210,16 @@ async def send_manager_prompt(message: types.Message):
             [InlineKeyboardButton(text="Так", callback_data="request_manager")]
         ]
     )
-    await message.answer("Хочете вже дізнатися подробиці?👌", reply_markup=keyboard)
+    await send_with_delay(
+        message.answer,
+        "Хочете вже дізнатися подробиці?👌",
+        reply_markup=keyboard,
+    )
 
 
 async def send_manager_contact(message: types.Message):
-    await message.answer(
+    await send_with_delay(
+        message.answer,
         "Надаю вам контакт менеджера Володимира - @hr_volodymyr🧑🏻‍💻 "
         "Відправ йому «+» і він розповість вам про роботу, та буде допомагати в подальшому!🚀",
         reply_markup=build_manager_button(),
