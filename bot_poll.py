@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 API_TOKEN = os.getenv("TELEGRAM_API_TOKEN")
-MESSAGE_DELAY = 3
+MESSAGE_DELAY = 1
 
 
 async def send_with_delay(
@@ -36,13 +36,13 @@ def build_start_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Написати менеджеру",
+                    text="Написати менеджеру👨🏻‍💻",
                     callback_data="contact_manager"
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="Пройти опитування",
+                    text="Пройти опитування⚡️",
                     callback_data="start_poll"
                 )
             ]
@@ -55,7 +55,7 @@ def build_manager_button() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="написати Володимиру",
+                    text="Написати Володимиру✅",
                     url="https://t.me/hr_volodymyr?text=%2B",
                 )
             ]
@@ -208,8 +208,8 @@ async def send_income_question(bot: Bot, chat_id: int, skip_delay: bool = False)
 async def send_device_question(bot: Bot, chat_id: int, skip_delay: bool = False):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Так, є 👍🏻", callback_data="poll_device_yes")],
-            [InlineKeyboardButton(text="Ні, немає 🙅🏻‍♂️", callback_data="poll_device_no")],
+            [InlineKeyboardButton(text="Так, є", callback_data="poll_device_yes")],
+            [InlineKeyboardButton(text="Ні, немає", callback_data="poll_device_no")],
         ]
     )
     await send_with_delay(
