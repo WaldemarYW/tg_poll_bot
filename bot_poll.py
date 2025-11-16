@@ -762,9 +762,6 @@ async def render_ref_dashboard(message: types.Message, user: types.User, *, edit
         [InlineKeyboardButton(text="📝 Примітки", callback_data="open_notes_menu")]
     )
     buttons.append(
-        [InlineKeyboardButton(text="Написати менеджеру", url="https://t.me/hr_volodymyr?text=%2B")]
-    )
-    buttons.append(
         [InlineKeyboardButton(text="🔔 Нагадування", callback_data="open_reminder_settings")]
     )
 
@@ -931,10 +928,10 @@ async def render_notes_menu(
 
     keyboard = []
     if notes:
-        keyboard.extend(
-            [[InlineKeyboardButton(text=note["title"], callback_data=f"note_view:{note['id']}")]]
-            for note in notes
-        )
+        for note in notes:
+            keyboard.append(
+                [InlineKeyboardButton(text=note["title"], callback_data=f"note_view:{note['id']}")]
+            )
     keyboard.append([InlineKeyboardButton(text="➕ Додати примітку", callback_data="add_note")])
     keyboard.append([InlineKeyboardButton(text="↩️ Назад", callback_data="close_notes_menu")])
     markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
