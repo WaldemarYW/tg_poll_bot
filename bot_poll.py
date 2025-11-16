@@ -27,11 +27,13 @@ async def cmd_start(message: types.Message):
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Написати менеджеру",
+                    text="Написати менеджеру👨🏻‍💻",
                     callback_data="contact_manager"
-                ),
+                )
+            ],
+            [
                 InlineKeyboardButton(
-                    text="Пройти опитування",
+                    text="Пройти опитування⚡️",
                     callback_data="start_poll"
                 )
             ]
@@ -60,7 +62,7 @@ async def handle_contact_manager(callback: types.CallbackQuery):
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="написати Володимиру",
+                    text="Написати Менеджеру👨🏻‍💻",
                     url="https://t.me/hr_volodymyr?text=%2B",
                 )
             ]
@@ -68,7 +70,7 @@ async def handle_contact_manager(callback: types.CallbackQuery):
     )
 
     await callback.message.answer(
-        "Надаю вам контакт менеджера Володимира - https://t.me/hr_volodymyr🧑🏻‍💻 "
+        "Надаю вам контакт менеджера Володимира - @hr_volodymyr🧑🏻‍💻 "
         "Відправ йому «+» і він розповість вам про роботу, та буде допомагати "
         "в подальшому!🚀",
         reply_markup=manager_keyboard,
