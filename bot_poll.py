@@ -40,10 +40,23 @@ DEVICE_OPTIONS: Dict[str, str] = {
     "poll_device_no": "Ні, немає",
 }
 
+REMINDER_TASKS: Dict[int, asyncio.Task] = {}
+REMINDER_EDITORS: set[int] = set()
+DEFAULT_REMINDER_TEXT = (
+    "Ти вже сьогодні зможеш, пройти навчання та отримати перші кошти, "
+    "навчання багато часу не займе - пиши менеджеру Володимиру👇\n"
+    "@hr_volodymyr"
+)
+
 
 class PendingNoteCreationFilter(BaseFilter):
     async def __call__(self, message: types.Message) -> bool:
         return message.from_user.id in NOTE_CREATION_STATE
+
+
+class ReminderEditFilter(BaseFilter):
+    async def __call__(self, message: types.Message) -> bool:
+        return message.from_user.id in REMINDER_EDITORS
 
 
 async def send_with_delay(
@@ -150,10 +163,12 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS poll_responses (
                 user_id INTEGER PRIMARY KEY,
                 referrer_id INTEGER,
+                note_id INTEGER,
                 age TEXT,
                 income TEXT,
                 device TEXT,
                 notified INTEGER DEFAULT 0,
+                reminder_sent INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
@@ -164,6 +179,7 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS notes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 owner_id INTEGER NOT NULL,
+                group_id INTEGER,
                 title TEXT NOT NULL,
                 url TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -188,6 +204,28 @@ async def init_db():
             await db.execute("ALTER TABLE poll_responses ADD COLUMN note_id INTEGER")
         except sqlite3.OperationalError:
             pass
+        try:
+            await db.execute("ALTER TABLE poll_responses ADD COLUMN reminder_sent INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            await db.execute("ALTER TABLE notes ADD COLUMN group_id INTEGER")
+        except sqlite3.OperationalError:
+            pass
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reminder_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                text TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            INSERT OR IGNORE INTO reminder_settings (id, text) VALUES (1, ?)
+            """,
+            (DEFAULT_REMINDER_TEXT,),
+        )
         await db.commit()
 
 
@@ -229,13 +267,22 @@ async def fetch_groups() -> List[Tuple[int, str]]:
             return [(row["chat_id"], row["title"]) for row in rows]
 
 
-async def fetch_notes(owner_id: int) -> List[aiosqlite.Row]:
+async def fetch_notes(owner_id: int, group_id: int, viewer_id: Optional[int] = None) -> List[aiosqlite.Row]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM notes WHERE owner_id = ? ORDER BY created_at DESC",
-            (owner_id,),
-        ) as cursor:
+        query = """
+            SELECT * FROM notes
+            WHERE owner_id = ? AND group_id = ?
+        """
+        params: List[int] = [owner_id, group_id]
+
+        if viewer_id is not None:
+            query += " AND owner_id = ?"
+            params.append(viewer_id)
+
+        query += " ORDER BY created_at DESC"
+
+        async with db.execute(query, params) as cursor:
             return await cursor.fetchall()
 
 
@@ -246,11 +293,11 @@ async def fetch_note(note_id: int) -> Optional[aiosqlite.Row]:
             return await cursor.fetchone()
 
 
-async def create_note(owner_id: int, title: str, url: str) -> int:
+async def create_note(owner_id: int, group_id: int, title: str, url: str) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "INSERT INTO notes (owner_id, title, url) VALUES (?, ?, ?)",
-            (owner_id, title, url),
+            "INSERT INTO notes (owner_id, group_id, title, url) VALUES (?, ?, ?, ?)",
+            (owner_id, group_id, title, url),
         )
         await db.commit()
         return cursor.lastrowid
@@ -441,26 +488,19 @@ async def get_referral_stats(user_id: int) -> Dict[str, int]:
 
         async with db.execute(
             """
-            SELECT
-                COUNT(*) as completed,
-                SUM(CASE WHEN device = ? THEN 1 ELSE 0 END) as have_device,
-                SUM(CASE WHEN device = ? THEN 1 ELSE 0 END) as no_device
+            SELECT COUNT(*) as completed
             FROM poll_responses
             WHERE referrer_id = ? AND device IS NOT NULL
             """,
-            (DEVICE_OPTIONS["poll_device_yes"], DEVICE_OPTIONS["poll_device_no"], user_id),
+            (user_id,),
         ) as cursor:
             row = await cursor.fetchone()
 
     completed = row["completed"] if row and row["completed"] else 0
-    have_device = row["have_device"] if row and row["have_device"] else 0
-    no_device = row["no_device"] if row and row["no_device"] else 0
 
     return {
         "clicks": clicks,
         "completed": completed,
-        "have_device": have_device,
-        "no_device": no_device,
     }
 
 
@@ -481,6 +521,67 @@ async def mark_notified(user_id: int):
             (user_id,),
         )
         await db.commit()
+
+
+async def mark_reminder_sent(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE poll_responses SET reminder_sent = 1 WHERE user_id = ?",
+            (user_id,),
+        )
+        await db.commit()
+
+
+async def reset_reminder_sent(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE poll_responses SET reminder_sent = 0 WHERE user_id = ?",
+            (user_id,),
+        )
+        await db.commit()
+
+
+async def get_reminder_text() -> str:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT text FROM reminder_settings WHERE id = 1") as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row and row[0] else DEFAULT_REMINDER_TEXT
+
+
+async def set_reminder_text(new_text: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE reminder_settings SET text = ? WHERE id = 1",
+            (new_text,),
+        )
+        await db.commit()
+
+
+def cancel_reminder_task(user_id: int):
+    task = REMINDER_TASKS.pop(user_id, None)
+    if task and not task.done():
+        task.cancel()
+
+
+async def schedule_reminder(bot: Bot, user_id: int, chat_id: int):
+    cancel_reminder_task(user_id)
+
+    async def reminder_worker():
+        try:
+            await asyncio.sleep(600)
+            poll_row = await fetch_poll_response(user_id)
+            if not poll_row:
+                return
+            if poll_row["device"] or poll_row["reminder_sent"]:
+                return
+
+            text = await get_reminder_text()
+            await bot.send_message(chat_id, text, reply_markup=build_manager_button())
+            await mark_reminder_sent(user_id)
+        except asyncio.CancelledError:
+            pass
+
+    REMINDER_TASKS[user_id] = asyncio.create_task(reminder_worker())
 
 
 async def fetch_user_record(user_id: int) -> Optional[aiosqlite.Row]:
@@ -616,8 +717,7 @@ async def render_ref_dashboard(message: types.Message, user: types.User, *, edit
     stats_text = (
         "📊 Статистика рефералів:\n"
         f"• Переходи за вашим посиланням: {stats['clicks']}\n"
-        f"• Завершено опитувань: {stats['completed']}\n"
-        f"• Ноутбук: Так – {stats['have_device']}, Ні – {stats['no_device']}"
+        f"• Пройшли тест: {stats['completed']}"
     )
 
     group_prompt = (
@@ -634,6 +734,8 @@ async def render_ref_dashboard(message: types.Message, user: types.User, *, edit
         stats_text,
         "",
         group_prompt,
+        "",
+        "Натисніть кнопку, щоб скопіювати посилання.",
     ]
 
     buttons = []
@@ -641,8 +743,15 @@ async def render_ref_dashboard(message: types.Message, user: types.User, *, edit
         buttons.append(
             [InlineKeyboardButton(text="📂 Обрати групу", callback_data="open_group_menu")]
         )
+    if bot_username:
+        buttons.append(
+            [InlineKeyboardButton(text="📋 Скопіювати посилання", callback_data="copy_main_ref")]
+        )
     buttons.append(
         [InlineKeyboardButton(text="📝 Примітки", callback_data="open_notes_menu")]
+    )
+    buttons.append(
+        [InlineKeyboardButton(text="🔔 Нагадування", callback_data="open_reminder_settings")]
     )
 
     reply_markup = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -681,6 +790,26 @@ async def render_group_menu(message: types.Message, *, edit: bool = False):
         await message.answer(text, reply_markup=markup)
 
 
+async def render_reminder_settings(message: types.Message, *, edit: bool = False):
+    reminder_text = await get_reminder_text()
+    lines = [
+        "🔔 Поточний текст нагадування:",
+        "",
+        reminder_text,
+        "",
+        "Це повідомлення отримають користувачі, які не завершили тест за 10 хвилин.",
+    ]
+    keyboard = [
+        [InlineKeyboardButton(text="✍️ Змінити текст", callback_data="edit_reminder_text")],
+        [InlineKeyboardButton(text="↩️ Назад", callback_data="close_reminder_settings")],
+    ]
+    markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    if edit:
+        await message.edit_text("\n".join(lines), reply_markup=markup)
+    else:
+        await message.answer("\n".join(lines), reply_markup=markup)
+
+
 async def render_notes_menu(
     message: types.Message,
     user: types.User,
@@ -689,11 +818,31 @@ async def render_notes_menu(
     view_note_id: Optional[int] = None,
 ):
     bot_username = await get_bot_username(message.bot)
+    group_info = await get_user_group(user.id)
+
+    if not group_info:
+        text = (
+            "Спершу оберіть групу в головному меню, щоб керувати примітками. "
+            "Кожна група має власний список приміток і статистику."
+        )
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📂 Обрати групу", callback_data="open_group_menu")],
+                [InlineKeyboardButton(text="↩️ Назад", callback_data="close_notes_menu")],
+            ]
+        )
+        if edit:
+            await message.edit_text(text, reply_markup=markup)
+        else:
+            await message.answer(text, reply_markup=markup)
+        return
+
+    group_id, group_title = group_info
 
     if view_note_id:
         note = await fetch_note(view_note_id)
-        if not note or note["owner_id"] != user.id:
-            await message.answer("Примітку не знайдено або немає доступу.")
+        if not note or note["owner_id"] != user.id or note["group_id"] != group_id:
+            await message.answer("Примітку не знайдено або вона належить іншій групі.")
             return
 
         clicks = await count_note_clicks(note["id"])
@@ -703,16 +852,28 @@ async def render_notes_menu(
             else "—"
         )
         lines = [
+            f"Група: {group_title}",
             f"Назва: {note['title']}",
             f"Посилання: {note['url'] or '—'}",
             f"Перегляди: {clicks}",
             "",
             f"Реф-посилання для цієї примітки:\n{referral_link}",
+            "",
+            "Натисніть кнопку, щоб скопіювати або відкривати посилання.",
         ]
         keyboard = []
         if note["url"]:
             keyboard.append(
                 [InlineKeyboardButton(text="🌐 Відкрити примітку", url=note["url"])]
+            )
+        if bot_username:
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        text="📋 Скопіювати реф-посилання",
+                        callback_data=f"copy_note_ref:{note['id']}",
+                    )
+                ]
             )
         keyboard.append(
             [InlineKeyboardButton(text="🗑 Видалити примітку", callback_data=f"delete_note:{note['id']}")]
@@ -727,15 +888,15 @@ async def render_notes_menu(
             await message.answer("\n".join(lines), reply_markup=markup)
         return
 
-    notes = await fetch_notes(user.id)
+    notes = await fetch_notes(user.id, group_id, viewer_id=user.id)
     if not notes:
         text = (
-            "У вас поки немає приміток. Натисніть кнопку нижче, щоб додати першу.\n"
-            "Використовуйте примітки для відстеження, де ви розміщуєте своє посилання."
+            f"Для групи «{group_title}» поки немає приміток. Натисніть кнопку нижче, щоб додати першу.\n"
+            "Використовуйте примітки для відстеження, де ви розміщуєте реф-посилання."
         )
     else:
         text_lines = [
-            "Ваші примітки:",
+            f"Примітки для групи «{group_title}»:",
             "",
         ]
         for note in notes[:5]:
@@ -747,10 +908,12 @@ async def render_notes_menu(
         text_lines.append("Обери одну з приміток для подробиць.")
         text = "\n".join(text_lines)
 
-    keyboard = [
-        [InlineKeyboardButton(text=note["title"], callback_data=f"note_view:{note['id']}")]
-        for note in notes
-    ]
+    keyboard = []
+    if notes:
+        keyboard.extend(
+            [[InlineKeyboardButton(text=note["title"], callback_data=f"note_view:{note['id']}")]]
+            for note in notes
+        )
     keyboard.append([InlineKeyboardButton(text="➕ Додати примітку", callback_data="add_note")])
     keyboard.append([InlineKeyboardButton(text="↩️ Назад", callback_data="close_notes_menu")])
     markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -765,6 +928,13 @@ async def cmd_start(message: types.Message):
     await upsert_user(message.from_user)
     payload = extract_start_payload(message)
     await handle_referral_payload(payload, message.from_user)
+    await ensure_poll_row(message.from_user.id)
+    poll_row = await fetch_poll_response(message.from_user.id)
+    if not poll_row or not poll_row["device"]:
+        await reset_reminder_sent(message.from_user.id)
+        await schedule_reminder(message.bot, message.from_user.id, message.chat.id)
+    else:
+        cancel_reminder_task(message.from_user.id)
 
     await send_with_delay(
         message.answer,
@@ -837,6 +1007,8 @@ async def handle_device_choice(callback: types.CallbackQuery):
     await upsert_user(callback.from_user)
     selection = DEVICE_OPTIONS.get(callback.data, "Невідомо")
     await update_poll_response(callback.from_user.id, device=selection)
+    cancel_reminder_task(callback.from_user.id)
+    await mark_reminder_sent(callback.from_user.id)
 
     if callback.data == "poll_device_no":
         await send_with_delay(
@@ -923,8 +1095,17 @@ async def handle_note_view(callback: types.CallbackQuery):
 
 async def handle_note_add(callback: types.CallbackQuery):
     await upsert_user(callback.from_user)
-    NOTE_CREATION_STATE[callback.from_user.id] = {"step": "title"}
+    group_info = await get_user_group(callback.from_user.id)
+    if not group_info:
+        await callback.answer("Спочатку оберіть групу", show_alert=True)
+        return
+
+    NOTE_CREATION_STATE[callback.from_user.id] = {
+        "step": "title",
+        "group_id": group_info[0],
+    }
     await callback.message.answer(
+        f"Створюємо примітку для групи «{group_info[1]}».\n"
         "Введіть назву примітки. Надішліть /cancel, щоб скасувати створення."
     )
     await callback.answer()
@@ -939,12 +1120,67 @@ async def handle_note_delete(callback: types.CallbackQuery):
         await callback.answer("Не вдалося видалити примітку", show_alert=True)
         return
 
+    note = await fetch_note(note_id)
+    group_info = await get_user_group(callback.from_user.id)
+    if not note or note["owner_id"] != callback.from_user.id:
+        await callback.answer("Немає доступу або примітку вже видалено", show_alert=True)
+        return
+    if not group_info or note["group_id"] != group_info[0]:
+        await callback.answer("Ця примітка належить іншій групі", show_alert=True)
+        return
+
     deleted = await delete_note(callback.from_user.id, note_id)
     if deleted:
         await callback.answer("Примітку видалено")
         await render_notes_menu(callback.message, callback.from_user, edit=True)
     else:
         await callback.answer("Немає доступу або примітку вже видалено", show_alert=True)
+
+
+async def handle_copy_main_ref(callback: types.CallbackQuery):
+    bot_username = await get_bot_username(callback.message.bot)
+    ref_link = f"https://t.me/{bot_username}?start=ref_{callback.from_user.id}"
+    await callback.answer(f"Посилання скопійовано:\n{ref_link}", show_alert=True)
+
+
+async def handle_copy_note_ref(callback: types.CallbackQuery):
+    bot_username = await get_bot_username(callback.message.bot)
+    _, _, note_id_str = callback.data.partition(":")
+    try:
+        note_id = int(note_id_str)
+    except ValueError:
+        await callback.answer("Не вдалося сформувати посилання", show_alert=True)
+        return
+
+    note = await fetch_note(note_id)
+    if not note or note["owner_id"] != callback.from_user.id:
+        await callback.answer("Немає доступу до цієї примітки", show_alert=True)
+        return
+
+    ref_link = f"https://t.me/{bot_username}?start=ref_{callback.from_user.id}_note_{note_id}"
+    await callback.answer(f"Посилання для примітки:\n{ref_link}", show_alert=True)
+
+
+async def handle_open_reminder_settings(callback: types.CallbackQuery):
+    await upsert_user(callback.from_user)
+    await render_reminder_settings(callback.message, edit=True)
+    await callback.answer()
+
+
+async def handle_close_reminder_settings(callback: types.CallbackQuery):
+    await upsert_user(callback.from_user)
+    await render_ref_dashboard(callback.message, callback.from_user, edit=True)
+    await callback.answer()
+
+
+async def handle_edit_reminder_text(callback: types.CallbackQuery):
+    await upsert_user(callback.from_user)
+    REMINDER_EDITORS.add(callback.from_user.id)
+    await callback.message.answer(
+        "Надішліть новий текст нагадування одним повідомленням.\n"
+        "Використайте /cancel, щоб скасувати зміну."
+    )
+    await callback.answer("Очікую нове повідомлення")
 
 
 async def track_group_presence(message: types.Message):
@@ -975,9 +1211,43 @@ async def handle_note_input(message: types.Message):
         title = state.get("title")
         url = text if text != "-" else ""
         NOTE_CREATION_STATE.pop(message.from_user.id, None)
-        note_id = await create_note(message.from_user.id, title or "Без назви", url)
+        group_id = state.get("group_id")
+        if group_id is None:
+            group_info = await get_user_group(message.from_user.id)
+            group_id = group_info[0] if group_info else None
+
+        if group_id is None:
+            await message.answer("Не вдалося визначити групу для примітки. Спробуйте ще раз.")
+            return
+
+        note_id = await create_note(
+            message.from_user.id,
+            group_id,
+            title or "Без назви",
+            url,
+        )
         await message.answer(f"Примітку збережено (ID: {note_id}).")
         await render_notes_menu(message, message.from_user)
+
+
+async def handle_reminder_edit_input(message: types.Message):
+    if message.from_user.id not in REMINDER_EDITORS:
+        return
+
+    text = (message.text or "").strip()
+    if text.lower() == "/cancel":
+        REMINDER_EDITORS.discard(message.from_user.id)
+        await message.answer("Зміну нагадування скасовано.")
+        return
+
+    if not text:
+        await message.answer("Повідомлення не може бути порожнім. Спробуйте ще раз або /cancel.")
+        return
+
+    REMINDER_EDITORS.discard(message.from_user.id)
+    await set_reminder_text(text)
+    await message.answer("Текст нагадування оновлено.")
+    await render_reminder_settings(message)
 async def send_age_question(bot: Bot, chat_id: int, skip_delay: bool = False):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -1063,6 +1333,7 @@ async def main():
 
     # Регистрируем хэндлеры
     dp.message.register(handle_note_input, PendingNoteCreationFilter())
+    dp.message.register(handle_reminder_edit_input, ReminderEditFilter())
     dp.message.register(cmd_start, CommandStart())
     dp.message.register(cmd_poll, Command("poll"))
     dp.message.register(cmd_ref, Command("ref"))
@@ -1084,6 +1355,11 @@ async def main():
     dp.callback_query.register(handle_note_view, F.data.startswith("note_view:"))
     dp.callback_query.register(handle_note_add, F.data == "add_note")
     dp.callback_query.register(handle_note_delete, F.data.startswith("delete_note:"))
+    dp.callback_query.register(handle_copy_main_ref, F.data == "copy_main_ref")
+    dp.callback_query.register(handle_copy_note_ref, F.data.startswith("copy_note_ref:"))
+    dp.callback_query.register(handle_open_reminder_settings, F.data == "open_reminder_settings")
+    dp.callback_query.register(handle_close_reminder_settings, F.data == "close_reminder_settings")
+    dp.callback_query.register(handle_edit_reminder_text, F.data == "edit_reminder_text")
 
     # Запуск бота
     await dp.start_polling(bot)
