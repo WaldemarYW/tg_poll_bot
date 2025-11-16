@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, F, types
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import BaseFilter, Command, CommandStart
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from dotenv import load_dotenv
@@ -576,7 +577,17 @@ async def schedule_reminder(bot: Bot, user_id: int, chat_id: int):
                 return
 
             text = await get_reminder_text()
-            await bot.send_message(chat_id, text, reply_markup=build_manager_button())
+            remind_keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="Написати менеджеру",
+                            url="https://t.me/hr_volodymyr?text=%2B",
+                        )
+                    ]
+                ]
+            )
+            await bot.send_message(chat_id, text, reply_markup=remind_keyboard)
             await mark_reminder_sent(user_id)
         except asyncio.CancelledError:
             pass
@@ -739,16 +750,19 @@ async def render_ref_dashboard(message: types.Message, user: types.User, *, edit
     ]
 
     buttons = []
-    if groups:
-        buttons.append(
-            [InlineKeyboardButton(text="📂 Обрати групу", callback_data="open_group_menu")]
-        )
     if bot_username:
         buttons.append(
             [InlineKeyboardButton(text="📋 Скопіювати посилання", callback_data="copy_main_ref")]
         )
+    if groups:
+        buttons.append(
+            [InlineKeyboardButton(text="📂 Обрати групу", callback_data="open_group_menu")]
+        )
     buttons.append(
         [InlineKeyboardButton(text="📝 Примітки", callback_data="open_notes_menu")]
+    )
+    buttons.append(
+        [InlineKeyboardButton(text="Написати менеджеру", url="https://t.me/hr_volodymyr?text=%2B")]
     )
     buttons.append(
         [InlineKeyboardButton(text="🔔 Нагадування", callback_data="open_reminder_settings")]
@@ -832,7 +846,10 @@ async def render_notes_menu(
             ]
         )
         if edit:
-            await message.edit_text(text, reply_markup=markup)
+            try:
+                await message.edit_text(text, reply_markup=markup)
+            except TelegramBadRequest:
+                await message.answer(text, reply_markup=markup)
         else:
             await message.answer(text, reply_markup=markup)
         return
@@ -882,10 +899,14 @@ async def render_notes_menu(
             [InlineKeyboardButton(text="↩️ Назад", callback_data="open_notes_menu")]
         )
         markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+        content = "\n".join(lines)
         if edit:
-            await message.edit_text("\n".join(lines), reply_markup=markup)
+            try:
+                await message.edit_text(content, reply_markup=markup)
+            except TelegramBadRequest:
+                await message.answer(content, reply_markup=markup)
         else:
-            await message.answer("\n".join(lines), reply_markup=markup)
+            await message.answer(content, reply_markup=markup)
         return
 
     notes = await fetch_notes(user.id, group_id, viewer_id=user.id)
@@ -919,7 +940,10 @@ async def render_notes_menu(
     markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     if edit:
-        await message.edit_text(text, reply_markup=markup)
+        try:
+            await message.edit_text(text, reply_markup=markup)
+        except TelegramBadRequest:
+            await message.answer(text, reply_markup=markup)
     else:
         await message.answer(text, reply_markup=markup)
 
