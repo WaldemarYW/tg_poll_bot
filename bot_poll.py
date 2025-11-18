@@ -214,6 +214,22 @@ async def init_db():
             await db.execute("ALTER TABLE notes ADD COLUMN group_id INTEGER")
         except sqlite3.OperationalError:
             pass
+        try:
+            await db.execute("ALTER TABLE referral_clicks ADD COLUMN group_id INTEGER")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            await db.execute("ALTER TABLE poll_responses ADD COLUMN group_id INTEGER")
+        except sqlite3.OperationalError:
+            pass
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS clean_launch_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                group_id INTEGER
+            )
+            """
+        )
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS reminder_settings (
@@ -267,6 +283,19 @@ async def fetch_groups() -> List[Tuple[int, str]]:
         async with db.execute("SELECT chat_id, title FROM groups ORDER BY title") as cursor:
             rows = await cursor.fetchall()
             return [(row["chat_id"], row["title"]) for row in rows]
+
+
+async def fetch_group_info(group_id: int) -> Optional[Tuple[int, str]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT chat_id, title FROM groups WHERE chat_id = ?",
+            (group_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return row["chat_id"], row["title"]
+    return None
 
 
 async def fetch_notes(owner_id: int, group_id: int, viewer_id: Optional[int] = None) -> List[aiosqlite.Row]:
@@ -325,6 +354,26 @@ async def count_note_clicks(note_id: int) -> int:
             return row[0] if row else 0
 
 
+async def set_clean_launch_group(group_id: int):
+    await set_user_group(0, group_id)
+
+
+async def get_clean_launch_group() -> Optional[Tuple[int, str]]:
+    return await get_user_group(0)
+
+
+async def get_display_clean_group(user_id: int) -> Optional[Tuple[int, str]]:
+    clean_group = await get_clean_launch_group()
+    if clean_group:
+        return clean_group
+    return await get_user_group(user_id)
+
+
+async def get_clean_launch_group_id() -> Optional[int]:
+    group = await get_clean_launch_group()
+    return group[0] if group else None
+
+
 async def set_user_group(user_id: int, group_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -360,14 +409,15 @@ async def record_referral_click(
     referrer_id: int,
     referred_user_id: int,
     note_id: Optional[int] = None,
+    group_id: Optional[int] = None,
 ):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """
-            INSERT OR IGNORE INTO referral_clicks (referrer_id, referred_user_id, note_id)
-            VALUES (?, ?, ?)
+            INSERT OR IGNORE INTO referral_clicks (referrer_id, referred_user_id, note_id, group_id)
+            VALUES (?, ?, ?, ?)
             """,
-            (referrer_id, referred_user_id, note_id),
+            (referrer_id, referred_user_id, note_id, group_id),
         )
         await db.commit()
 
@@ -388,20 +438,25 @@ async def ensure_poll_row(
     user_id: int,
     referrer_id: Optional[int] = None,
     note_id: Optional[int] = None,
+    group_id: Optional[int] = None,
 ):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """
-            INSERT INTO poll_responses (user_id, referrer_id, note_id)
-            VALUES (?, ?, ?)
+            INSERT INTO poll_responses (user_id, referrer_id, note_id, group_id)
+            VALUES (?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 referrer_id = COALESCE(poll_responses.referrer_id, excluded.referrer_id),
                 note_id = CASE
                     WHEN excluded.note_id IS NOT NULL THEN excluded.note_id
                     ELSE poll_responses.note_id
+                END,
+                group_id = CASE
+                    WHEN excluded.group_id IS NOT NULL THEN excluded.group_id
+                    ELSE poll_responses.group_id
                 END
             """,
-            (user_id, referrer_id, note_id),
+            (user_id, referrer_id, note_id, group_id),
         )
         await db.commit()
 
@@ -504,6 +559,59 @@ async def get_referral_stats(user_id: int) -> Dict[str, int]:
         "clicks": clicks,
         "completed": completed,
     }
+
+
+async def get_group_referral_stats(user_id: int, group_id: int) -> Dict[str, int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT COUNT(*) as cnt
+            FROM referral_clicks
+            WHERE referrer_id = ? AND group_id = ?
+            """,
+            (user_id, group_id),
+        ) as cursor:
+            row_clicks = await cursor.fetchone()
+            clicks = row_clicks["cnt"] if row_clicks else 0
+
+        async with db.execute(
+            """
+            SELECT COUNT(*) as completed
+            FROM poll_responses
+            WHERE referrer_id = ? AND group_id = ? AND device IS NOT NULL
+            """,
+            (user_id, group_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+    completed = row["completed"] if row and row["completed"] else 0
+    return {
+        "clicks": clicks,
+        "completed": completed,
+    }
+
+
+async def get_clean_launch_stats() -> Dict[str, int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT COUNT(*) as total FROM poll_responses WHERE referrer_id IS NULL",
+        ) as cursor:
+            row_total = await cursor.fetchone()
+            total = row_total["total"] if row_total else 0
+
+        async with db.execute(
+            """
+            SELECT COUNT(*) as completed
+            FROM poll_responses
+            WHERE referrer_id IS NULL AND device IS NOT NULL
+            """,
+        ) as cursor:
+            row_completed = await cursor.fetchone()
+            completed = row_completed["completed"] if row_completed else 0
+
+    return {"total": total, "completed": completed}
 
 
 async def was_notified(user_id: int) -> bool:
@@ -631,10 +739,23 @@ async def notify_group_about_poll(bot: Bot, user_id: int):
         return
 
     referrer_id = poll_row["referrer_id"]
-    if not referrer_id:
-        return
+    group_id = poll_row["group_id"]
+    group_info: Optional[Tuple[int, str]] = None
 
-    group_info = await get_user_group(referrer_id)
+    if group_id:
+        group_info = await fetch_group_info(group_id)
+
+    if not group_info and referrer_id:
+        group_info = await get_user_group(referrer_id)
+        if group_info:
+            group_id = group_info[0]
+
+    if not group_info and not referrer_id:
+        clean_group = await get_clean_launch_group()
+        if clean_group:
+            group_info = clean_group
+            group_id = clean_group[0]
+
     if not group_info:
         return
 
@@ -669,6 +790,8 @@ async def notify_group_about_poll(bot: Bot, user_id: int):
 
     if referrer_id:
         lines.append(f"Реферал від: {format_user_reference(referrer_row, referrer_id)}")
+    else:
+        lines.append("Реферал від: чистий запуск")
 
     await bot.send_message(group_info[0], "\n".join(lines))
     await mark_notified(user_id)
@@ -682,34 +805,43 @@ def extract_start_payload(message: types.Message) -> Optional[str]:
     return None
 
 
-async def handle_referral_payload(payload: Optional[str], user: types.User):
+async def handle_referral_payload(payload: Optional[str], user: types.User) -> bool:
     if not payload or not payload.startswith("ref_"):
-        return
+        return False
 
     body = payload[4:]
-    note_id = None
+    note_id: Optional[int] = None
+    group_id: Optional[int] = None
 
     if "_note_" in body:
-        ref_part, note_part = body.split("_note_", maxsplit=1)
+        body, note_part = body.split("_note_", maxsplit=1)
         try:
             note_id = int(note_part)
         except ValueError:
             note_id = None
+
+    if "_group_" in body:
+        ref_part, group_part = body.split("_group_", maxsplit=1)
+        try:
+            group_id = int(group_part)
+        except ValueError:
+            group_id = None
     else:
         ref_part = body
 
     try:
         ref_id = int(ref_part)
     except ValueError:
-        return
+        return False
 
     if ref_id == user.id:
-        return
+        return False
 
-    await record_referral_click(ref_id, user.id, note_id)
+    await record_referral_click(ref_id, user.id, note_id, group_id)
     if note_id:
         await record_note_click(note_id, user.id)
-    await ensure_poll_row(user.id, ref_id, note_id)
+    await ensure_poll_row(user.id, ref_id, note_id, group_id)
+    return True
 
 
 async def render_ref_dashboard(message: types.Message, user: types.User, *, edit: bool = False):
@@ -717,25 +849,26 @@ async def render_ref_dashboard(message: types.Message, user: types.User, *, edit
     referral_link = f"https://t.me/{bot_username}?start=ref_{user.id}" if bot_username else "—"
 
     stats = await get_referral_stats(user.id)
-    group_info = await get_user_group(user.id)
+    clean_group_info = await get_display_clean_group(user.id)
+    clean_stats = await get_clean_launch_stats()
     groups = await fetch_groups()
 
-    group_line = (
-        f"Поточна група: {escape(group_info[1])} (ID: {group_info[0]})"
-        if group_info
-        else "Поточна група: не обрано"
+    clean_group_line = (
+        f"Група для чистого запуску: {escape(clean_group_info[1])} (ID: {clean_group_info[0]})"
+        if clean_group_info
+        else "Група для чистого запуску: не обрано"
     )
 
     stats_text = (
-        "📊 Статистика рефералів:\n"
-        f"• Переходи за вашим посиланням: {stats['clicks']}\n"
+        "📊 Загальна статистика:\n"
+        f"• Переходи за усіма посиланнями: {stats['clicks']}\n"
         f"• Пройшли тест: {stats['completed']}"
     )
 
-    group_prompt = (
-        "Натисніть кнопку нижче, щоб обрати групу для сповіщень."
-        if groups
-        else "Додайте бота до потрібної групи і надішліть у ній повідомлення, щоб вона з’явилась у списку."
+    clean_stats_text = (
+        "📈 Чистий запуск:\n"
+        f"• Усього стартів: {clean_stats['total']}\n"
+        f"• Пройшли тест: {clean_stats['completed']}"
     )
 
     referral_link_html = f"<code>{escape(referral_link)}</code>"
@@ -743,23 +876,44 @@ async def render_ref_dashboard(message: types.Message, user: types.User, *, edit
     lines = [
         "🔗 Ваша реферальна інформація",
         f"Посилання: {referral_link_html}",
-        group_line,
+        clean_group_line,
+        "",
+        clean_stats_text,
         "",
         stats_text,
         "",
-        group_prompt,
-        "",
-        "Натисніть кнопку, щоб скопіювати посилання.",
     ]
 
-    buttons = []
     if groups:
-        buttons.append(
-            [InlineKeyboardButton(text="📂 Обрати групу", callback_data="open_group_menu")]
+        lines.extend(
+            [
+                "Групи, куди надходитимуть ліди:",
+                "Оберіть потрібну групу нижче, щоб отримати її реф-посилання та примітки.",
+            ]
         )
+    else:
+        lines.append(
+            "Додайте бота до потрібної групи і надішліть там повідомлення, щоб вона з’явилась у списку."
+        )
+
+    buttons = []
     buttons.append(
-        [InlineKeyboardButton(text="📝 Примітки", callback_data="open_notes_menu")]
+        [
+            InlineKeyboardButton(
+                text="📂 Група для чистого запуску", callback_data="open_clean_group_menu"
+            )
+        ]
     )
+    if groups:
+        for chat_id, title in groups:
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text=title,
+                        callback_data=f"group_details:{chat_id}",
+                    )
+                ]
+            )
     buttons.append(
         [InlineKeyboardButton(text="🔔 Нагадування", callback_data="open_reminder_settings")]
     )
@@ -782,18 +936,18 @@ async def render_group_menu(message: types.Message, *, edit: bool = False):
             "Поки що немає жодної групи. Додайте бота до потрібного чату та "
             "надішліть там повідомлення, щоб він з’явився у списку."
         )
-        keyboard = [[InlineKeyboardButton(text="↩️ Назад", callback_data="close_group_menu")]]
+        keyboard = [[InlineKeyboardButton(text="↩️ Назад", callback_data="close_clean_group_menu")]]
     else:
         text_lines = [
-            "Оберіть групу, куди будуть надходити сповіщення про лідів:",
+            "Оберіть групу, куди будуть надходити ліди з чистого запуску:",
             "",
         ]
         text = "\n".join(text_lines)
         keyboard = [
-            [InlineKeyboardButton(text=title, callback_data=f"set_group:{chat_id}")]
+            [InlineKeyboardButton(text=title, callback_data=f"set_clean_group:{chat_id}")]
             for chat_id, title in groups
         ]
-        keyboard.append([InlineKeyboardButton(text="↩️ Назад", callback_data="close_group_menu")])
+        keyboard.append([InlineKeyboardButton(text="↩️ Назад", callback_data="close_clean_group_menu")])
 
     markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
     if edit:
@@ -822,70 +976,109 @@ async def render_reminder_settings(message: types.Message, *, edit: bool = False
         await message.answer("\n".join(lines), reply_markup=markup)
 
 
-async def render_notes_menu(
+async def render_group_details(
     message: types.Message,
     user: types.User,
+    group_id: int,
+    *,
+    edit: bool = False,
+):
+    group_info = await fetch_group_info(group_id)
+    if not group_info:
+        await message.answer("Групу не знайдено. Додайте бота до чату та спробуйте знову.")
+        return
+
+    bot_username = await get_bot_username(message.bot)
+    referral_link = (
+        f"https://t.me/{bot_username}?start=ref_{user.id}_group_{group_info[0]}"
+        if bot_username
+        else "—"
+    )
+    stats = await get_group_referral_stats(user.id, group_info[0])
+
+    lines = [
+        f"Група: {escape(group_info[1])} (ID: {group_info[0]})",
+        "",
+        f"Реф-посилання для цієї групи:\n<code>{escape(referral_link)}</code>",
+        "",
+        "📊 Статистика групи:",
+        f"• Переходи: {stats['clicks']}",
+        f"• Пройшли тест: {stats['completed']}",
+        "",
+        "Керування:",
+    ]
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                text="📝 Примітки", callback_data=f"group_notes:{group_info[0]}"
+            )
+        ],
+        [InlineKeyboardButton(text="↩️ Назад", callback_data="close_group_details")],
+    ]
+    markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    text = "\n".join(lines)
+    if edit:
+        try:
+            await message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+        except TelegramBadRequest:
+            await message.answer(text, reply_markup=markup, parse_mode="HTML")
+    else:
+        await message.answer(text, reply_markup=markup, parse_mode="HTML")
+
+
+async def render_group_notes(
+    message: types.Message,
+    user: types.User,
+    group_id: int,
     *,
     edit: bool = False,
     view_note_id: Optional[int] = None,
 ):
-    bot_username = await get_bot_username(message.bot)
-    group_info = await get_user_group(user.id)
-
+    group_info = await fetch_group_info(group_id)
     if not group_info:
-        text = (
-            "Спершу оберіть групу в головному меню, щоб керувати примітками. "
-            "Кожна група має власний список приміток і статистику."
-        )
-        markup = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📂 Обрати групу", callback_data="open_group_menu")],
-                [InlineKeyboardButton(text="↩️ Назад", callback_data="close_notes_menu")],
-            ]
-        )
-        if edit:
-            try:
-                await message.edit_text(text, reply_markup=markup)
-            except TelegramBadRequest:
-                await message.answer(text, reply_markup=markup)
-        else:
-            await message.answer(text, reply_markup=markup)
+        await message.answer("Групу не знайдено. Поверніться до головного меню.")
         return
 
-    group_id, group_title = group_info
+    bot_username = await get_bot_username(message.bot)
+
+    safe_group_title = escape(group_info[1])
 
     if view_note_id:
         note = await fetch_note(view_note_id)
         if not note or note["owner_id"] != user.id or note["group_id"] != group_id:
-            await message.answer("Примітку не знайдено або вона належить іншій групі.")
+            await message.answer("Примітку не знайдено або немає доступу.")
             return
 
         clicks = await count_note_clicks(note["id"])
         referral_link = (
-            f"https://t.me/{bot_username}?start=ref_{user.id}_note_{note['id']}"
+            f"https://t.me/{bot_username}?start=ref_{user.id}_group_{group_id}_note_{note['id']}"
             if bot_username
             else "—"
         )
         lines = [
-            f"Група: {escape(group_title)}",
+            f"Група: {safe_group_title}",
             f"Назва: {escape(note['title'])}",
             f"Посилання: {escape(note['url']) if note['url'] else '—'}",
             f"Перегляди: {clicks}",
             "",
-            f"Реф-посилання для цієї примітки:\n<code>{escape(referral_link)}</code>",
+            f"Реф-посилання для примітки:\n<code>{escape(referral_link)}</code>",
             "",
-            "Натисніть кнопку нижче, щоб відкривати або керувати приміткою.",
+            "Натисніть кнопку нижче для дій з приміткою.",
         ]
-        keyboard = []
+        keyboard: List[List[InlineKeyboardButton]] = []
         if note["url"]:
-            keyboard.append(
-                [InlineKeyboardButton(text="🌐 Відкрити примітку", url=note["url"])]
-            )
+            keyboard.append([InlineKeyboardButton(text="🌐 Відкрити примітку", url=note["url"])])
         keyboard.append(
-            [InlineKeyboardButton(text="🗑 Видалити примітку", callback_data=f"delete_note:{note['id']}")]
+            [
+                InlineKeyboardButton(
+                    text="🗑 Видалити примітку",
+                    callback_data=f"delete_note:{group_id}:{note['id']}",
+                )
+            ]
         )
         keyboard.append(
-            [InlineKeyboardButton(text="↩️ Назад", callback_data="open_notes_menu")]
+            [InlineKeyboardButton(text="↩️ Назад", callback_data=f"group_notes:{group_id}")]
         )
         markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
         content = "\n".join(lines)
@@ -901,12 +1094,12 @@ async def render_notes_menu(
     notes = await fetch_notes(user.id, group_id, viewer_id=user.id)
     if not notes:
         text = (
-            f"Для групи «{group_title}» поки немає приміток. Натисніть кнопку нижче, щоб додати першу.\n"
+            f"Для групи «{safe_group_title}» поки немає приміток. Натисніть кнопку нижче, щоб додати першу.\n"
             "Використовуйте примітки для відстеження, де ви розміщуєте реф-посилання."
         )
     else:
         text_lines = [
-            f"Примітки для групи «{group_title}»:",
+            f"Примітки для групи «{safe_group_title}»:",
             "",
         ]
         for note in notes[:5]:
@@ -916,17 +1109,26 @@ async def render_notes_menu(
         if len(notes) > 5:
             text_lines.append("... (перегляньте деталі через меню)")
         text_lines.append("")
-        text_lines.append("Обери одну з приміток для подробиць.")
+        text_lines.append("Оберіть примітку для деталей або створіть нову.")
         text = "\n".join(text_lines)
 
     keyboard = []
     if notes:
         for note in notes:
             keyboard.append(
-                [InlineKeyboardButton(text=note["title"], callback_data=f"note_view:{note['id']}")]
+                [
+                    InlineKeyboardButton(
+                        text=note["title"],
+                        callback_data=f"group_note_view:{group_id}:{note['id']}",
+                    )
+                ]
             )
-    keyboard.append([InlineKeyboardButton(text="➕ Додати примітку", callback_data="add_note")])
-    keyboard.append([InlineKeyboardButton(text="↩️ Назад", callback_data="close_notes_menu")])
+    keyboard.append(
+        [InlineKeyboardButton(text="➕ Додати примітку", callback_data=f"add_note:{group_id}")]
+    )
+    keyboard.append(
+        [InlineKeyboardButton(text="↩️ Назад", callback_data=f"group_details:{group_id}")]
+    )
     markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     if edit:
@@ -941,8 +1143,11 @@ async def render_notes_menu(
 async def cmd_start(message: types.Message):
     await upsert_user(message.from_user)
     payload = extract_start_payload(message)
-    await handle_referral_payload(payload, message.from_user)
-    await ensure_poll_row(message.from_user.id)
+    handled_referral = await handle_referral_payload(payload, message.from_user)
+    group_id = None
+    if not handled_referral:
+        group_id = await get_clean_launch_group_id()
+    await ensure_poll_row(message.from_user.id, group_id=group_id)
     poll_row = await fetch_poll_response(message.from_user.id)
     if not poll_row or not poll_row["device"]:
         await reset_reminder_sent(message.from_user.id)
@@ -1065,9 +1270,9 @@ async def handle_group_selection(callback: types.CallbackQuery):
         await callback.answer("Не вдалося обрати групу", show_alert=True)
         return
 
-    await set_user_group(callback.from_user.id, group_id)
+    await set_clean_launch_group(group_id)
     await render_ref_dashboard(callback.message, callback.from_user, edit=True)
-    await callback.answer("Групу оновлено")
+    await callback.answer("Групу для чистого запуску оновлено")
 
 
 async def handle_open_group_menu(callback: types.CallbackQuery):
@@ -1082,41 +1287,78 @@ async def handle_close_group_menu(callback: types.CallbackQuery):
     await callback.answer()
 
 
-async def handle_open_notes_menu(callback: types.CallbackQuery):
+async def handle_group_details(callback: types.CallbackQuery):
     await upsert_user(callback.from_user)
-    await render_notes_menu(callback.message, callback.from_user, edit=True)
+    _, _, group_id_str = callback.data.partition(":")
+    try:
+        group_id = int(group_id_str)
+    except ValueError:
+        await callback.answer("Не вдалося відкрити групу", show_alert=True)
+        return
+
+    await render_group_details(callback.message, callback.from_user, group_id, edit=True)
     await callback.answer()
 
 
-async def handle_close_notes_menu(callback: types.CallbackQuery):
+async def handle_close_group_details(callback: types.CallbackQuery):
     await upsert_user(callback.from_user)
     await render_ref_dashboard(callback.message, callback.from_user, edit=True)
     await callback.answer()
 
 
-async def handle_note_view(callback: types.CallbackQuery):
+async def handle_group_notes(callback: types.CallbackQuery):
     await upsert_user(callback.from_user)
-    _, _, note_id_str = callback.data.partition(":")
+    _, _, group_id_str = callback.data.partition(":")
     try:
-        note_id = int(note_id_str)
+        group_id = int(group_id_str)
+    except ValueError:
+        await callback.answer("Не вдалося відкрити примітки", show_alert=True)
+        return
+
+    await render_group_notes(callback.message, callback.from_user, group_id, edit=True)
+    await callback.answer()
+
+
+async def handle_group_note_view(callback: types.CallbackQuery):
+    await upsert_user(callback.from_user)
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer("Не вдалося відкрити примітку", show_alert=True)
+        return
+    try:
+        group_id = int(parts[1])
+        note_id = int(parts[2])
     except ValueError:
         await callback.answer("Не вдалося відкрити примітку", show_alert=True)
         return
 
-    await render_notes_menu(callback.message, callback.from_user, edit=True, view_note_id=note_id)
+    await render_group_notes(
+        callback.message,
+        callback.from_user,
+        group_id,
+        edit=True,
+        view_note_id=note_id,
+    )
     await callback.answer()
 
 
-async def handle_note_add(callback: types.CallbackQuery):
+async def handle_group_note_add(callback: types.CallbackQuery):
     await upsert_user(callback.from_user)
-    group_info = await get_user_group(callback.from_user.id)
+    _, _, group_id_str = callback.data.partition(":")
+    try:
+        group_id = int(group_id_str)
+    except ValueError:
+        await callback.answer("Не вдалося знайти групу", show_alert=True)
+        return
+
+    group_info = await fetch_group_info(group_id)
     if not group_info:
-        await callback.answer("Спочатку оберіть групу", show_alert=True)
+        await callback.answer("Група недоступна", show_alert=True)
         return
 
     NOTE_CREATION_STATE[callback.from_user.id] = {
         "step": "title",
-        "group_id": group_info[0],
+        "group_id": group_id,
     }
     await callback.message.answer(
         f"Створюємо примітку для групи «{group_info[1]}».\n"
@@ -1125,28 +1367,28 @@ async def handle_note_add(callback: types.CallbackQuery):
     await callback.answer()
 
 
-async def handle_note_delete(callback: types.CallbackQuery):
+async def handle_group_note_delete(callback: types.CallbackQuery):
     await upsert_user(callback.from_user)
-    _, _, note_id_str = callback.data.partition(":")
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer("Не вдалося видалити примітку", show_alert=True)
+        return
     try:
-        note_id = int(note_id_str)
+        group_id = int(parts[1])
+        note_id = int(parts[2])
     except ValueError:
         await callback.answer("Не вдалося видалити примітку", show_alert=True)
         return
 
     note = await fetch_note(note_id)
-    group_info = await get_user_group(callback.from_user.id)
-    if not note or note["owner_id"] != callback.from_user.id:
+    if not note or note["owner_id"] != callback.from_user.id or note["group_id"] != group_id:
         await callback.answer("Немає доступу або примітку вже видалено", show_alert=True)
-        return
-    if not group_info or note["group_id"] != group_info[0]:
-        await callback.answer("Ця примітка належить іншій групі", show_alert=True)
         return
 
     deleted = await delete_note(callback.from_user.id, note_id)
     if deleted:
         await callback.answer("Примітку видалено")
-        await render_notes_menu(callback.message, callback.from_user, edit=True)
+        await render_group_notes(callback.message, callback.from_user, group_id, edit=True)
     else:
         await callback.answer("Немає доступу або примітку вже видалено", show_alert=True)
 
@@ -1211,10 +1453,6 @@ async def handle_note_input(message: types.Message):
         NOTE_CREATION_STATE.pop(message.from_user.id, None)
         group_id = state.get("group_id")
         if group_id is None:
-            group_info = await get_user_group(message.from_user.id)
-            group_id = group_info[0] if group_info else None
-
-        if group_id is None:
             await message.answer("Не вдалося визначити групу для примітки. Спробуйте ще раз.")
             return
 
@@ -1225,7 +1463,7 @@ async def handle_note_input(message: types.Message):
             url,
         )
         await message.answer(f"Примітку збережено (ID: {note_id}).")
-        await render_notes_menu(message, message.from_user)
+        await render_group_notes(message, message.from_user, group_id)
 
 
 async def handle_reminder_edit_input(message: types.Message):
@@ -1345,14 +1583,15 @@ async def main():
         handle_device_choice, F.data.in_(list(DEVICE_OPTIONS.keys()))
     )
     dp.callback_query.register(handle_manager_prompt, F.data == "request_manager")
-    dp.callback_query.register(handle_group_selection, F.data.startswith("set_group:"))
-    dp.callback_query.register(handle_open_group_menu, F.data == "open_group_menu")
-    dp.callback_query.register(handle_close_group_menu, F.data == "close_group_menu")
-    dp.callback_query.register(handle_open_notes_menu, F.data == "open_notes_menu")
-    dp.callback_query.register(handle_close_notes_menu, F.data == "close_notes_menu")
-    dp.callback_query.register(handle_note_view, F.data.startswith("note_view:"))
-    dp.callback_query.register(handle_note_add, F.data == "add_note")
-    dp.callback_query.register(handle_note_delete, F.data.startswith("delete_note:"))
+    dp.callback_query.register(handle_group_selection, F.data.startswith("set_clean_group:"))
+    dp.callback_query.register(handle_open_group_menu, F.data == "open_clean_group_menu")
+    dp.callback_query.register(handle_close_group_menu, F.data == "close_clean_group_menu")
+    dp.callback_query.register(handle_group_details, F.data.startswith("group_details:"))
+    dp.callback_query.register(handle_close_group_details, F.data == "close_group_details")
+    dp.callback_query.register(handle_group_notes, F.data.startswith("group_notes:"))
+    dp.callback_query.register(handle_group_note_view, F.data.startswith("group_note_view:"))
+    dp.callback_query.register(handle_group_note_add, F.data.startswith("add_note:"))
+    dp.callback_query.register(handle_group_note_delete, F.data.startswith("delete_note:"))
     dp.callback_query.register(handle_open_reminder_settings, F.data == "open_reminder_settings")
     dp.callback_query.register(handle_close_reminder_settings, F.data == "close_reminder_settings")
     dp.callback_query.register(handle_edit_reminder_text, F.data == "edit_reminder_text")
