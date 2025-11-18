@@ -82,13 +82,13 @@ def build_start_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Написати менеджеру",
+                    text="Написати менеджеру👨🏻‍💻",
                     callback_data="contact_manager"
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="Пройти опитування",
+                    text="Пройти опитування⚡️",
                     callback_data="start_poll"
                 )
             ]
@@ -101,7 +101,7 @@ def build_manager_button() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Написати Володимиру",
+                    text="Написати Володимиру✅",
                     url="https://t.me/hr_volodymyr?text=%2B",
                 )
             ]
@@ -690,7 +690,7 @@ async def schedule_reminder(bot: Bot, user_id: int, chat_id: int):
                 inline_keyboard=[
                     [
                         InlineKeyboardButton(
-                            text="Написати менеджеру",
+                            text="Написати менеджеру👨🏻‍💻",
                             url="https://t.me/hr_volodymyr?text=%2B",
                         )
                     ]
