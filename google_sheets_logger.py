@@ -142,7 +142,12 @@ class SheetsReferralLogger:
         spreadsheet = self._get_spreadsheet_sync()
         worksheet = self._get_or_create_worksheet_sync(spreadsheet, sheet_name)
         self._ensure_headers_sync(worksheet)
-        worksheet.append_row(row, value_input_option="RAW")
+        worksheet.append_row(
+            row,
+            value_input_option="RAW",
+            insert_data_option="INSERT_ROWS",
+            table_range="A1",
+        )
 
     def _get_spreadsheet_sync(self):
         if self._spreadsheet is not None:
