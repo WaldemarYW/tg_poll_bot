@@ -74,10 +74,10 @@ class TestGoogleSheetsLogger(unittest.TestCase):
 
     def test_find_first_free_stats_row_uses_abc_only(self):
         rows = [
-            ["Назва реклами", "Посилання", "Кількість переходів"],
-            ["ad-1", "https://a", "3", "x", "y"],
-            ["", "", "", "occupied-d", "occupied-e"],
-            ["ad-2", "https://b", "1"],
+            ["Назва реклами", "id", "Посилання", "Кількість переходів"],
+            ["ad-1", "101", "https://a", "3", "x", "y"],
+            ["", "", "", "", "occupied-e"],
+            ["ad-2", "102", "https://b", "1"],
         ]
         idx = SheetsReferralLogger._find_first_free_stats_row(rows)
         self.assertEqual(idx, 3)

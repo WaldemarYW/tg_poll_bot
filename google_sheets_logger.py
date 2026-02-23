@@ -26,6 +26,7 @@ HEADERS = [
 ]
 STATS_HEADERS = [
     "Назва реклами",
+    "id",
     "Посилання",
     "Кількість переходів",
 ]
@@ -224,31 +225,39 @@ class SheetsReferralLogger:
         self._ensure_stats_headers_sync(worksheet)
 
         note_url = (event.note_url or "").strip()
+        note_id_str = str(event.note_id) if event.note_id is not None else ""
         rows = worksheet.get_all_values()
         for idx, row in enumerate(rows[1:], start=2):
             existing_title = row[0].strip() if len(row) > 0 else ""
-            existing_url = row[1].strip() if len(row) > 1 else ""
-            if existing_title == note_title and existing_url == note_url:
-                current_count_raw = row[2].strip() if len(row) > 2 else "0"
+            existing_id = row[1].strip() if len(row) > 1 else ""
+            existing_url = row[2].strip() if len(row) > 2 else ""
+            # Primary key by note id when available to avoid merging
+            # different notes with the same title and empty URL.
+            is_same_note = (
+                (note_id_str and existing_id == note_id_str)
+                or (not note_id_str and existing_title == note_title and existing_url == note_url)
+            )
+            if is_same_note:
+                current_count_raw = row[3].strip() if len(row) > 3 else "0"
                 try:
                     current_count = int(current_count_raw)
                 except ValueError:
                     current_count = 0
-                worksheet.update(f"C{idx}", [[str(current_count + 1)]], value_input_option="RAW")
+                worksheet.update(f"D{idx}", [[str(current_count + 1)]], value_input_option="RAW")
                 return
 
         target_row = self._find_first_free_stats_row(rows)
         worksheet.update(
-            f"A{target_row}:C{target_row}",
-            [[note_title, note_url, "1"]],
+            f"A{target_row}:D{target_row}",
+            [[note_title, note_id_str, note_url, "1"]],
             value_input_option="RAW",
         )
 
     @staticmethod
     def _find_first_free_stats_row(rows: List[List[str]]) -> int:
         """
-        Find first row (starting from 2) where A/B/C are all empty, ignoring
-        any data in columns D+.
+        Find first row (starting from 2) where A/B/C/D are all empty, ignoring
+        any data in columns E+.
         """
         if len(rows) <= 1:
             return 2
@@ -257,7 +266,8 @@ class SheetsReferralLogger:
             col_a = row[0].strip() if len(row) > 0 else ""
             col_b = row[1].strip() if len(row) > 1 else ""
             col_c = row[2].strip() if len(row) > 2 else ""
-            if not col_a and not col_b and not col_c:
+            col_d = row[3].strip() if len(row) > 3 else ""
+            if not col_a and not col_b and not col_c and not col_d:
                 return idx
 
         return len(rows) + 1
