@@ -42,8 +42,9 @@ class TestGoogleSheetsLogger(unittest.TestCase):
             sheet_name="Group [1]",
             event_ts_utc="2026-02-23T15:04:05Z",
         )
-        self.assertEqual(row[8], NO_NOTE_KEY)
-        self.assertEqual(row[7], "")
+        self.assertEqual(row[0], NO_NOTE_KEY)
+        self.assertEqual(row[4], "")
+        self.assertEqual(row[2], "")
 
     def test_build_event_row_adds_usernames_when_present(self):
         event = SheetsReferralEvent(
@@ -62,8 +63,8 @@ class TestGoogleSheetsLogger(unittest.TestCase):
             sheet_name="Group [1]",
             event_ts_utc="2026-02-23T15:04:05Z",
         )
-        self.assertEqual(row[4], "@ref_user")
-        self.assertEqual(row[6], "@lead_user")
+        self.assertEqual(row[8], "@ref_user")
+        self.assertEqual(row[2], "@lead_user")
 
 
 class TestGoogleSheetsLoggerAsync(unittest.IsolatedAsyncioTestCase):

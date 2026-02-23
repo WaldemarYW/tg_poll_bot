@@ -10,16 +10,16 @@ INVALID_SHEET_CHARS_RE = re.compile(r"[\[\]:*?/\\]")
 MAX_SHEET_NAME_LEN = 95
 
 HEADERS = [
+    "назва_примітки",
+    "посилання_примітки",
+    "юзернейм_запрошеного",
     "час_події_utc",
+    "id_примітки",
     "id_групи",
     "назва_групи",
     "id_реферера",
     "юзернейм_реферера",
     "id_запрошеного",
-    "юзернейм_запрошеного",
-    "id_примітки",
-    "назва_примітки",
-    "посилання_примітки",
     "джерело",
     "час_запису_ботом",
 ]
@@ -90,16 +90,16 @@ class SheetsReferralLogger:
         referrer_username = (event.referrer_username or "").strip()
         referred_username = (event.referred_username or "").strip()
         return [
+            note_title,
+            note_url,
+            f"@{referred_username}" if referred_username else "",
             event_ts_utc,
+            str(event.note_id) if event.note_id is not None else "",
             str(event.group_id) if event.group_id is not None else "",
             event.group_title or "",
             str(event.referrer_id),
             f"@{referrer_username}" if referrer_username else "",
             str(event.referred_user_id),
-            f"@{referred_username}" if referred_username else "",
-            str(event.note_id) if event.note_id is not None else "",
-            note_title,
-            note_url,
             event.source,
             event_ts_utc,
         ]
