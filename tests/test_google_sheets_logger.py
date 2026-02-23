@@ -30,7 +30,9 @@ class TestGoogleSheetsLogger(unittest.TestCase):
             group_id=1,
             group_title="Group",
             referrer_id=10,
+            referrer_username=None,
             referred_user_id=20,
+            referred_username=None,
             note_id=None,
             note_title=None,
             note_url=None,
@@ -40,8 +42,28 @@ class TestGoogleSheetsLogger(unittest.TestCase):
             sheet_name="Group [1]",
             event_ts_utc="2026-02-23T15:04:05Z",
         )
-        self.assertEqual(row[7], NO_NOTE_KEY)
-        self.assertEqual(row[6], "")
+        self.assertEqual(row[8], NO_NOTE_KEY)
+        self.assertEqual(row[7], "")
+
+    def test_build_event_row_adds_usernames_when_present(self):
+        event = SheetsReferralEvent(
+            group_id=1,
+            group_title="Group",
+            referrer_id=10,
+            referrer_username="ref_user",
+            referred_user_id=20,
+            referred_username="lead_user",
+            note_id=30,
+            note_title="Note",
+            note_url="",
+        )
+        row = SheetsReferralLogger.build_event_row(
+            event,
+            sheet_name="Group [1]",
+            event_ts_utc="2026-02-23T15:04:05Z",
+        )
+        self.assertEqual(row[4], "@ref_user")
+        self.assertEqual(row[6], "@lead_user")
 
 
 class TestGoogleSheetsLoggerAsync(unittest.IsolatedAsyncioTestCase):
@@ -58,7 +80,9 @@ class TestGoogleSheetsLoggerAsync(unittest.IsolatedAsyncioTestCase):
             group_id=1,
             group_title="Team A",
             referrer_id=10,
+            referrer_username="ref_user",
             referred_user_id=20,
+            referred_username="new_user",
             note_id=30,
             note_title="Campaign",
             note_url="https://example.com",

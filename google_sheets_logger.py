@@ -10,17 +10,18 @@ INVALID_SHEET_CHARS_RE = re.compile(r"[\[\]:*?/\\]")
 MAX_SHEET_NAME_LEN = 95
 
 HEADERS = [
-    "event_ts_utc",
-    "group_id",
-    "group_title",
-    "sheet_name",
-    "referrer_id",
-    "referred_user_id",
-    "note_id",
-    "note_title",
-    "note_url",
-    "source",
-    "recorded_at_bot_ts",
+    "час_події_utc",
+    "id_групи",
+    "назва_групи",
+    "id_реферера",
+    "юзернейм_реферера",
+    "id_запрошеного",
+    "юзернейм_запрошеного",
+    "id_примітки",
+    "назва_примітки",
+    "посилання_примітки",
+    "джерело",
+    "час_запису_ботом",
 ]
 
 
@@ -52,7 +53,9 @@ class SheetsReferralEvent:
     group_id: Optional[int]
     group_title: Optional[str]
     referrer_id: int
+    referrer_username: Optional[str]
     referred_user_id: int
+    referred_username: Optional[str]
     note_id: Optional[int]
     note_title: Optional[str]
     note_url: Optional[str]
@@ -84,13 +87,16 @@ class SheetsReferralLogger:
     def build_event_row(event: SheetsReferralEvent, *, sheet_name: str, event_ts_utc: str) -> List[str]:
         note_title = (event.note_title or "").strip() or NO_NOTE_KEY
         note_url = (event.note_url or "").strip()
+        referrer_username = (event.referrer_username or "").strip()
+        referred_username = (event.referred_username or "").strip()
         return [
             event_ts_utc,
             str(event.group_id) if event.group_id is not None else "",
             event.group_title or "",
-            sheet_name,
             str(event.referrer_id),
+            f"@{referrer_username}" if referrer_username else "",
             str(event.referred_user_id),
+            f"@{referred_username}" if referred_username else "",
             str(event.note_id) if event.note_id is not None else "",
             note_title,
             note_url,

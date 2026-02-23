@@ -864,6 +864,8 @@ async def handle_referral_payload(payload: Optional[str], user: types.User) -> b
     if inserted:
         resolved_group_id = group_id
         resolved_group_title: Optional[str] = None
+        referrer_username: Optional[str] = None
+        referred_username: Optional[str] = None
         if resolved_group_id is not None:
             group_info = await fetch_group_info(resolved_group_id)
             if group_info:
@@ -881,12 +883,22 @@ async def handle_referral_payload(payload: Optional[str], user: types.User) -> b
                 note_title = note["title"] or NO_NOTE_KEY
                 note_url = note["url"] or ""
 
+        referrer_row = await fetch_user_record(ref_id)
+        if referrer_row and referrer_row["username"]:
+            referrer_username = referrer_row["username"]
+
+        referred_row = await fetch_user_record(user.id)
+        if referred_row and referred_row["username"]:
+            referred_username = referred_row["username"]
+
         await SHEETS_LOGGER.log_referral_click_event(
             SheetsReferralEvent(
                 group_id=resolved_group_id,
                 group_title=resolved_group_title,
                 referrer_id=ref_id,
+                referrer_username=referrer_username,
                 referred_user_id=user.id,
+                referred_username=referred_username,
                 note_id=note_id,
                 note_title=note_title,
                 note_url=note_url,
