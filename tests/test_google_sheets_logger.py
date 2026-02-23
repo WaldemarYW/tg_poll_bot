@@ -72,6 +72,16 @@ class TestGoogleSheetsLogger(unittest.TestCase):
         self.assertEqual(row[8], "@ref_user")
         self.assertEqual(row[2], "@lead_user")
 
+    def test_find_first_free_stats_row_uses_abc_only(self):
+        rows = [
+            ["Назва реклами", "Посилання", "Кількість переходів"],
+            ["ad-1", "https://a", "3", "x", "y"],
+            ["", "", "", "occupied-d", "occupied-e"],
+            ["ad-2", "https://b", "1"],
+        ]
+        idx = SheetsReferralLogger._find_first_free_stats_row(rows)
+        self.assertEqual(idx, 3)
+
 
 class TestGoogleSheetsLoggerAsync(unittest.IsolatedAsyncioTestCase):
     async def test_log_referral_click_event_calls_append(self):

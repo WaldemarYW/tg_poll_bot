@@ -237,12 +237,30 @@ class SheetsReferralLogger:
                 worksheet.update(f"C{idx}", [[str(current_count + 1)]], value_input_option="RAW")
                 return
 
-        worksheet.append_row(
-            [note_title, note_url, "1"],
+        target_row = self._find_first_free_stats_row(rows)
+        worksheet.update(
+            f"A{target_row}:C{target_row}",
+            [[note_title, note_url, "1"]],
             value_input_option="RAW",
-            insert_data_option="INSERT_ROWS",
-            table_range="A1",
         )
+
+    @staticmethod
+    def _find_first_free_stats_row(rows: List[List[str]]) -> int:
+        """
+        Find first row (starting from 2) where A/B/C are all empty, ignoring
+        any data in columns D+.
+        """
+        if len(rows) <= 1:
+            return 2
+
+        for idx, row in enumerate(rows[1:], start=2):
+            col_a = row[0].strip() if len(row) > 0 else ""
+            col_b = row[1].strip() if len(row) > 1 else ""
+            col_c = row[2].strip() if len(row) > 2 else ""
+            if not col_a and not col_b and not col_c:
+                return idx
+
+        return len(rows) + 1
 
     @staticmethod
     def _column_letter(index: int) -> str:
