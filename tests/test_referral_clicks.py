@@ -43,6 +43,23 @@ class TestReferralClicks(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(inserted_first)
         self.assertFalse(inserted_second)
 
+    async def test_record_referral_click_allows_same_user_with_different_note(self):
+        inserted_first = await bot_poll.record_referral_click(
+            referrer_id=100,
+            referred_user_id=200,
+            note_id=1,
+            group_id=99,
+        )
+        inserted_second = await bot_poll.record_referral_click(
+            referrer_id=100,
+            referred_user_id=200,
+            note_id=2,
+            group_id=99,
+        )
+
+        self.assertTrue(inserted_first)
+        self.assertTrue(inserted_second)
+
 
 if __name__ == "__main__":
     unittest.main()

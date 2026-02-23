@@ -4,6 +4,7 @@ import os
 import sqlite3
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, F, types
@@ -130,6 +131,19 @@ def build_manager_button() -> InlineKeyboardMarkup:
     )
 
 
+def is_valid_note_url(value: str) -> bool:
+    raw = (value or "").strip()
+    if not raw:
+        return False
+
+    parsed = urlparse(raw)
+    if parsed.scheme in {"http", "https"}:
+        return bool(parsed.netloc)
+    if parsed.scheme == "tg":
+        return bool(parsed.path or parsed.netloc)
+    return False
+
+
 async def get_bot_username(bot: Bot) -> str:
     global BOT_USERNAME
     if BOT_USERNAME:
@@ -177,7 +191,8 @@ async def init_db():
                 referrer_id INTEGER,
                 referred_user_id INTEGER,
                 timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(referrer_id, referred_user_id)
+                note_id INTEGER,
+                group_id INTEGER
             )
             """
         )
@@ -219,6 +234,43 @@ async def init_db():
             )
             """
         )
+        # Legacy migration: old schema had UNIQUE(referrer_id, referred_user_id),
+        # which blocks registering the same user for different notes.
+        async with db.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'referral_clicks'"
+        ) as cursor:
+            row = await cursor.fetchone()
+            referral_clicks_sql = row[0] if row and row[0] else ""
+
+        if "UNIQUE(referrer_id, referred_user_id)" in referral_clicks_sql:
+            await db.execute("ALTER TABLE referral_clicks RENAME TO referral_clicks_old")
+            await db.execute(
+                """
+                CREATE TABLE referral_clicks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    referrer_id INTEGER,
+                    referred_user_id INTEGER,
+                    timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+                    note_id INTEGER,
+                    group_id INTEGER
+                )
+                """
+            )
+            old_columns: set[str] = set()
+            async with db.execute("PRAGMA table_info(referral_clicks_old)") as cursor:
+                async for col_row in cursor:
+                    old_columns.add(col_row[1])
+            note_expr = "note_id" if "note_id" in old_columns else "NULL AS note_id"
+            group_expr = "group_id" if "group_id" in old_columns else "NULL AS group_id"
+            await db.execute(
+                f"""
+                INSERT INTO referral_clicks (id, referrer_id, referred_user_id, timestamp, note_id, group_id)
+                SELECT id, referrer_id, referred_user_id, timestamp, {note_expr}, {group_expr}
+                FROM referral_clicks_old
+                """
+            )
+            await db.execute("DROP TABLE referral_clicks_old")
+
         try:
             await db.execute("ALTER TABLE referral_clicks ADD COLUMN note_id INTEGER")
         except sqlite3.OperationalError:
@@ -239,6 +291,12 @@ async def init_db():
             await db.execute("ALTER TABLE referral_clicks ADD COLUMN group_id INTEGER")
         except sqlite3.OperationalError:
             pass
+        await db.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_referral_clicks_ref_referred_note
+            ON referral_clicks (referrer_id, referred_user_id, IFNULL(note_id, -1))
+            """
+        )
         try:
             await db.execute("ALTER TABLE poll_responses ADD COLUMN group_id INTEGER")
         except sqlite3.OperationalError:
@@ -1118,6 +1176,8 @@ async def render_group_notes(
             return
 
         clicks = await count_note_clicks(note["id"])
+        note_url_raw = note["url"] or ""
+        note_url_valid = is_valid_note_url(note_url_raw)
         referral_link = (
             f"https://t.me/{bot_username}?start=ref_{user.id}_group_{group_id}_note_{note['id']}"
             if bot_username
@@ -1126,7 +1186,7 @@ async def render_group_notes(
         lines = [
             f"Група: {safe_group_title}",
             f"Назва: {escape(note['title'])}",
-            f"Посилання: {escape(note['url']) if note['url'] else '—'}",
+            f"Посилання: {escape(note_url_raw) if note_url_raw else '—'}",
             f"Перегляди: {clicks}",
             "",
             f"Реф-посилання для примітки:\n<code>{escape(referral_link)}</code>",
@@ -1134,8 +1194,8 @@ async def render_group_notes(
             "Натисніть кнопку нижче для дій з приміткою.",
         ]
         keyboard: List[List[InlineKeyboardButton]] = []
-        if note["url"]:
-            keyboard.append([InlineKeyboardButton(text="🌐 Відкрити примітку", url=note["url"])])
+        if note_url_valid:
+            keyboard.append([InlineKeyboardButton(text="🌐 Відкрити примітку", url=note_url_raw)])
         keyboard.append(
             [
                 InlineKeyboardButton(
@@ -1517,6 +1577,12 @@ async def handle_note_input(message: types.Message):
         await message.answer("Тепер надішліть посилання для примітки (або '-' якщо воно не потрібне).")
     elif step == "url":
         title = state.get("title")
+        if text != "-" and not is_valid_note_url(text):
+            await message.answer(
+                "Посилання має починатися з http://, https:// або tg://. "
+                "Надішліть валідне посилання або '-' якщо його не потрібно."
+            )
+            return
         url = text if text != "-" else ""
         NOTE_CREATION_STATE.pop(message.from_user.id, None)
         group_id = state.get("group_id")
