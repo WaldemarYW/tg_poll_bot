@@ -12,6 +12,7 @@ from aiogram.filters import BaseFilter, Command, CommandStart
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from dotenv import load_dotenv
 from html import escape
+from google_sheets_logger import SheetsReferralEvent, SheetsReferralLogger, NO_NOTE_KEY
 
 
 # Загружаем переменные из .env (файл должен лежать рядом с bot_poll.py)
@@ -22,6 +23,26 @@ MESSAGE_DELAY = 1
 DB_PATH = Path(__file__).with_name("bot_data.db")
 BOT_USERNAME: Optional[str] = None
 NOTE_CREATION_STATE: Dict[int, Dict[str, Optional[str]]] = {}
+GOOGLE_SHEETS_SPREADSHEET_ID = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID")
+GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or os.getenv("GOOGLE_CREDS")
+GOOGLE_SHEETS_ENABLED = os.getenv("GOOGLE_SHEETS_ENABLED", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+GOOGLE_SHEETS_TIMEOUT_SEC_RAW = os.getenv("GOOGLE_SHEETS_TIMEOUT_SEC", "5")
+try:
+    GOOGLE_SHEETS_TIMEOUT_SEC = float(GOOGLE_SHEETS_TIMEOUT_SEC_RAW)
+except ValueError:
+    GOOGLE_SHEETS_TIMEOUT_SEC = 5.0
+
+SHEETS_LOGGER = SheetsReferralLogger(
+    enabled=GOOGLE_SHEETS_ENABLED,
+    spreadsheet_id=GOOGLE_SHEETS_SPREADSHEET_ID,
+    service_account_json=GOOGLE_SERVICE_ACCOUNT_JSON,
+    timeout_sec=GOOGLE_SHEETS_TIMEOUT_SEC,
+)
 
 AGE_OPTIONS: Dict[str, str] = {
     "18-24": "18-24",
@@ -410,9 +431,9 @@ async def record_referral_click(
     referred_user_id: int,
     note_id: Optional[int] = None,
     group_id: Optional[int] = None,
-):
+) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
+        cursor = await db.execute(
             """
             INSERT OR IGNORE INTO referral_clicks (referrer_id, referred_user_id, note_id, group_id)
             VALUES (?, ?, ?, ?)
@@ -420,6 +441,7 @@ async def record_referral_click(
             (referrer_id, referred_user_id, note_id, group_id),
         )
         await db.commit()
+        return cursor.rowcount > 0
 
 
 async def record_note_click(note_id: int, user_id: int):
@@ -837,7 +859,40 @@ async def handle_referral_payload(payload: Optional[str], user: types.User) -> b
     if ref_id == user.id:
         return False
 
-    await record_referral_click(ref_id, user.id, note_id, group_id)
+    inserted = await record_referral_click(ref_id, user.id, note_id, group_id)
+
+    if inserted:
+        resolved_group_id = group_id
+        resolved_group_title: Optional[str] = None
+        if resolved_group_id is not None:
+            group_info = await fetch_group_info(resolved_group_id)
+            if group_info:
+                resolved_group_title = group_info[1]
+        else:
+            referrer_group = await get_user_group(ref_id)
+            if referrer_group:
+                resolved_group_id, resolved_group_title = referrer_group
+
+        note_title: Optional[str] = NO_NOTE_KEY
+        note_url: Optional[str] = None
+        if note_id is not None:
+            note = await fetch_note(note_id)
+            if note:
+                note_title = note["title"] or NO_NOTE_KEY
+                note_url = note["url"] or ""
+
+        await SHEETS_LOGGER.log_referral_click_event(
+            SheetsReferralEvent(
+                group_id=resolved_group_id,
+                group_title=resolved_group_title,
+                referrer_id=ref_id,
+                referred_user_id=user.id,
+                note_id=note_id,
+                note_title=note_title,
+                note_url=note_url,
+            )
+        )
+
     if note_id:
         await record_note_click(note_id, user.id)
     await ensure_poll_row(user.id, ref_id, note_id, group_id)
