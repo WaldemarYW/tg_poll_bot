@@ -7,6 +7,7 @@ from google_sheets_logger import (
     SheetsReferralEvent,
     SheetsReferralLogger,
     sanitize_sheet_name,
+    sanitize_stats_sheet_name,
 )
 
 
@@ -23,6 +24,11 @@ class TestGoogleSheetsLogger(unittest.TestCase):
         long_title = "A" * 200
         name = sanitize_sheet_name(77, long_title)
         self.assertTrue(name.endswith(" [77]"))
+        self.assertLessEqual(len(name), 95)
+
+    def test_sanitize_stats_sheet_name_has_suffix(self):
+        name = sanitize_stats_sheet_name(77, "HR VOLODYMYR")
+        self.assertTrue(name.endswith(" [Статистика]"))
         self.assertLessEqual(len(name), 95)
 
     def test_build_event_row_uses_no_note_key_when_note_missing(self):
@@ -76,6 +82,7 @@ class TestGoogleSheetsLoggerAsync(unittest.IsolatedAsyncioTestCase):
             timeout_sec=1,
         )
         logger._append_row_sync = MagicMock()
+        logger._upsert_stats_sheet_sync = MagicMock()
 
         event = SheetsReferralEvent(
             group_id=1,
@@ -91,6 +98,7 @@ class TestGoogleSheetsLoggerAsync(unittest.IsolatedAsyncioTestCase):
 
         await logger.log_referral_click_event(event)
         logger._append_row_sync.assert_called_once()
+        logger._upsert_stats_sheet_sync.assert_called_once()
 
 
 if __name__ == "__main__":

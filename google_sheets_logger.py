@@ -8,6 +8,7 @@ from typing import List, Optional
 NO_NOTE_KEY = "__NO_NOTE__"
 INVALID_SHEET_CHARS_RE = re.compile(r"[\[\]:*?/\\]")
 MAX_SHEET_NAME_LEN = 95
+STATS_SUFFIX = "[Статистика]"
 
 HEADERS = [
     "назва_примітки",
@@ -22,6 +23,11 @@ HEADERS = [
     "id_запрошеного",
     "джерело",
     "час_запису_ботом",
+]
+STATS_HEADERS = [
+    "назва_примітки",
+    "посилання_примітки",
+    "загальна_кількість_переходів",
 ]
 
 
@@ -46,6 +52,17 @@ def sanitize_sheet_name(group_id: Optional[int], group_title: Optional[str]) -> 
     if not trimmed_base:
         trimmed_base = "group"
     return f"{trimmed_base}{suffix}"
+
+
+def sanitize_stats_sheet_name(group_id: Optional[int], group_title: Optional[str]) -> str:
+    base = (group_title or "").strip() if group_title else ""
+    if not base:
+        base = f"group_{group_id}" if group_id is not None else "group_unknown"
+    safe_base = INVALID_SHEET_CHARS_RE.sub(" ", base)
+    safe_base = " ".join(safe_base.split()) or "group"
+    suffix = f" {STATS_SUFFIX}"
+    max_base_len = max(1, MAX_SHEET_NAME_LEN - len(suffix))
+    return f"{safe_base[:max_base_len].rstrip() or 'group'}{suffix}"
 
 
 @dataclass
@@ -127,6 +144,10 @@ class SheetsReferralLogger:
                     asyncio.to_thread(self._append_row_sync, sheet_name, row),
                     timeout=self.timeout_sec,
                 )
+                await asyncio.wait_for(
+                    asyncio.to_thread(self._upsert_stats_sheet_sync, event),
+                    timeout=self.timeout_sec,
+                )
         except Exception as exc:
             self.logger.error(
                 "Failed to log referral click to Google Sheets "
@@ -172,11 +193,56 @@ class SheetsReferralLogger:
         except gspread.exceptions.WorksheetNotFound:
             return spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=len(HEADERS) + 4)
 
+    def _get_or_create_stats_worksheet_sync(self, spreadsheet, sheet_name: str):
+        import gspread
+
+        try:
+            return spreadsheet.worksheet(sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            return spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=len(STATS_HEADERS) + 2)
+
     def _ensure_headers_sync(self, worksheet) -> None:
         first_row = worksheet.row_values(1)
         if first_row[: len(HEADERS)] != HEADERS:
             end_col = self._column_letter(len(HEADERS))
             worksheet.update(f"A1:{end_col}1", [HEADERS], value_input_option="RAW")
+
+    def _ensure_stats_headers_sync(self, worksheet) -> None:
+        first_row = worksheet.row_values(1)
+        if first_row[: len(STATS_HEADERS)] != STATS_HEADERS:
+            end_col = self._column_letter(len(STATS_HEADERS))
+            worksheet.update(f"A1:{end_col}1", [STATS_HEADERS], value_input_option="RAW")
+
+    def _upsert_stats_sheet_sync(self, event: SheetsReferralEvent) -> None:
+        note_title = (event.note_title or "").strip() or NO_NOTE_KEY
+        if note_title == NO_NOTE_KEY:
+            return
+
+        spreadsheet = self._get_spreadsheet_sync()
+        stats_sheet_name = sanitize_stats_sheet_name(event.group_id, event.group_title)
+        worksheet = self._get_or_create_stats_worksheet_sync(spreadsheet, stats_sheet_name)
+        self._ensure_stats_headers_sync(worksheet)
+
+        note_url = (event.note_url or "").strip()
+        rows = worksheet.get_all_values()
+        for idx, row in enumerate(rows[1:], start=2):
+            existing_title = row[0].strip() if len(row) > 0 else ""
+            existing_url = row[1].strip() if len(row) > 1 else ""
+            if existing_title == note_title and existing_url == note_url:
+                current_count_raw = row[2].strip() if len(row) > 2 else "0"
+                try:
+                    current_count = int(current_count_raw)
+                except ValueError:
+                    current_count = 0
+                worksheet.update(f"C{idx}", [[str(current_count + 1)]], value_input_option="RAW")
+                return
+
+        worksheet.append_row(
+            [note_title, note_url, "1"],
+            value_input_option="RAW",
+            insert_data_option="INSERT_ROWS",
+            table_range="A1",
+        )
 
     @staticmethod
     def _column_letter(index: int) -> str:
