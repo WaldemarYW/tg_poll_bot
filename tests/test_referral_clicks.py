@@ -60,6 +60,25 @@ class TestReferralClicks(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(inserted_first)
         self.assertTrue(inserted_second)
 
+    async def test_try_claim_notification_is_atomic(self):
+        await bot_poll.ensure_poll_row(user_id=321, referrer_id=100, note_id=1, group_id=99)
+        await bot_poll.update_poll_response(user_id=321, device="Так, є")
+
+        first_claim = await bot_poll.try_claim_notification(321)
+        second_claim = await bot_poll.try_claim_notification(321)
+
+        self.assertTrue(first_claim)
+        self.assertFalse(second_claim)
+
+    async def test_update_poll_response_does_not_reset_notified_on_device_update(self):
+        await bot_poll.ensure_poll_row(user_id=654, referrer_id=100, note_id=1, group_id=99)
+        await bot_poll.update_poll_response(user_id=654, age="18-24")
+        await bot_poll.mark_notified(654)
+
+        await bot_poll.update_poll_response(user_id=654, device="Так, є")
+
+        self.assertTrue(await bot_poll.was_notified(654))
+
 
 if __name__ == "__main__":
     unittest.main()

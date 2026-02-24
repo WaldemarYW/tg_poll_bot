@@ -567,7 +567,10 @@ async def update_poll_response(
         return
 
     updates.append("updated_at = CURRENT_TIMESTAMP")
-    updates.append("notified = 0")
+    # Do not reset `notified` when device is selected again, to avoid
+    # duplicate group notifications on repeated callback presses.
+    if device is None:
+        updates.append("notified = 0")
     params.append(user_id)
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -704,10 +707,33 @@ async def was_notified(user_id: int) -> bool:
             return bool(row and row[0])
 
 
+async def try_claim_notification(user_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            UPDATE poll_responses
+            SET notified = 1
+            WHERE user_id = ? AND notified = 0 AND device IS NOT NULL
+            """,
+            (user_id,),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
 async def mark_notified(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE poll_responses SET notified = 1 WHERE user_id = ?",
+            (user_id,),
+        )
+        await db.commit()
+
+
+async def unmark_notified(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE poll_responses SET notified = 0 WHERE user_id = ?",
             (user_id,),
         )
         await db.commit()
@@ -815,7 +841,10 @@ def format_user_reference(
 
 async def notify_group_about_poll(bot: Bot, user_id: int):
     poll_row = await fetch_poll_response(user_id)
-    if not poll_row or not poll_row["device"] or await was_notified(user_id):
+    if not poll_row or not poll_row["device"]:
+        return
+
+    if not await try_claim_notification(user_id):
         return
 
     referrer_id = poll_row["referrer_id"]
@@ -873,8 +902,12 @@ async def notify_group_about_poll(bot: Bot, user_id: int):
     else:
         lines.append("Реферал від: чистий запуск")
 
-    await bot.send_message(group_info[0], "\n".join(lines))
-    await mark_notified(user_id)
+    try:
+        await bot.send_message(group_info[0], "\n".join(lines))
+    except Exception:
+        # Allow retry in case send failed after we claimed the notification.
+        await unmark_notified(user_id)
+        raise
 
 
 def extract_start_payload(message: types.Message) -> Optional[str]:
