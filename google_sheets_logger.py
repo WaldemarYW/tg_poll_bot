@@ -243,14 +243,18 @@ class SheetsReferralLogger:
                     current_count = int(current_count_raw)
                 except ValueError:
                     current_count = 0
-                worksheet.update(f"D{idx}", [[str(current_count + 1)]], value_input_option="RAW")
+                worksheet.update(
+                    f"D{idx}",
+                    [[current_count + 1]],
+                    value_input_option="USER_ENTERED",
+                )
                 return
 
         target_row = self._find_first_free_stats_row(rows)
         worksheet.update(
             f"A{target_row}:D{target_row}",
-            [[note_title, note_id_str, note_url, "1"]],
-            value_input_option="RAW",
+            [[note_title, note_id_str, note_url, 1]],
+            value_input_option="USER_ENTERED",
         )
 
     @staticmethod
