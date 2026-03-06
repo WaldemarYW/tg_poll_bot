@@ -1192,6 +1192,7 @@ async def render_group_notes(
     *,
     edit: bool = False,
     view_note_id: Optional[int] = None,
+    page: int = 1,
 ):
     group_info = await fetch_group_info(group_id)
     if not group_info:
@@ -1201,6 +1202,9 @@ async def render_group_notes(
     bot_username = await get_bot_username(message.bot)
 
     safe_group_title = escape(group_info[1])
+
+    notes_page_size = 5
+    current_page = max(1, page)
 
     if view_note_id:
         note = await fetch_note(view_note_id)
@@ -1238,7 +1242,7 @@ async def render_group_notes(
             ]
         )
         keyboard.append(
-            [InlineKeyboardButton(text="↩️ Назад", callback_data=f"group_notes:{group_id}")]
+            [InlineKeyboardButton(text="↩️ Назад", callback_data=f"group_notes:{group_id}:{current_page}")]
         )
         markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
         content = "\n".join(lines)
@@ -1252,6 +1256,14 @@ async def render_group_notes(
         return
 
     notes = await fetch_notes(user.id, group_id, viewer_id=user.id)
+    total_notes = len(notes)
+    total_pages = max(1, (total_notes + notes_page_size - 1) // notes_page_size)
+    if current_page > total_pages:
+        current_page = total_pages
+    start_idx = (current_page - 1) * notes_page_size
+    end_idx = start_idx + notes_page_size
+    page_notes = notes[start_idx:end_idx]
+
     if not notes:
         text = (
             f"Для групи «{safe_group_title}» поки немає приміток. Натисніть кнопку нижче, щоб додати першу.\n"
@@ -1262,27 +1274,45 @@ async def render_group_notes(
             f"Примітки для групи «{safe_group_title}»:",
             "",
         ]
-        for note in notes[:5]:
+        for note in page_notes:
             clicks = await count_note_clicks(note["id"])
             safe_title = escape(note["title"])
             text_lines.append(f"• {safe_title} — {clicks} переходів")
-        if len(notes) > 5:
-            text_lines.append("... (перегляньте деталі через меню)")
+        text_lines.append("")
+        text_lines.append(f"Сторінка {current_page}/{total_pages}")
         text_lines.append("")
         text_lines.append("Оберіть примітку для деталей або створіть нову.")
         text = "\n".join(text_lines)
 
     keyboard = []
-    if notes:
-        for note in notes:
+    if page_notes:
+        for note in page_notes:
             keyboard.append(
                 [
                     InlineKeyboardButton(
                         text=note["title"],
-                        callback_data=f"group_note_view:{group_id}:{note['id']}",
+                        callback_data=f"group_note_view:{group_id}:{note['id']}:{current_page}",
                     )
                 ]
             )
+        if total_pages > 1:
+            nav_row: List[InlineKeyboardButton] = []
+            if current_page > 1:
+                nav_row.append(
+                    InlineKeyboardButton(
+                        text="⬅️",
+                        callback_data=f"group_notes:{group_id}:{current_page - 1}",
+                    )
+                )
+            if current_page < total_pages:
+                nav_row.append(
+                    InlineKeyboardButton(
+                        text="➡️",
+                        callback_data=f"group_notes:{group_id}:{current_page + 1}",
+                    )
+                )
+            if nav_row:
+                keyboard.append(nav_row)
     keyboard.append(
         [InlineKeyboardButton(text="➕ Додати примітку", callback_data=f"add_note:{group_id}")]
     )
@@ -1469,26 +1499,31 @@ async def handle_close_group_details(callback: types.CallbackQuery):
 
 async def handle_group_notes(callback: types.CallbackQuery):
     await upsert_user(callback.from_user)
-    _, _, group_id_str = callback.data.partition(":")
+    parts = callback.data.split(":")
+    if len(parts) not in (2, 3):
+        await callback.answer("Не вдалося відкрити примітки", show_alert=True)
+        return
     try:
-        group_id = int(group_id_str)
+        group_id = int(parts[1])
+        page = int(parts[2]) if len(parts) == 3 else 1
     except ValueError:
         await callback.answer("Не вдалося відкрити примітки", show_alert=True)
         return
 
-    await render_group_notes(callback.message, callback.from_user, group_id, edit=True)
+    await render_group_notes(callback.message, callback.from_user, group_id, edit=True, page=page)
     await callback.answer()
 
 
 async def handle_group_note_view(callback: types.CallbackQuery):
     await upsert_user(callback.from_user)
     parts = callback.data.split(":")
-    if len(parts) != 3:
+    if len(parts) not in (3, 4):
         await callback.answer("Не вдалося відкрити примітку", show_alert=True)
         return
     try:
         group_id = int(parts[1])
         note_id = int(parts[2])
+        page = int(parts[3]) if len(parts) == 4 else 1
     except ValueError:
         await callback.answer("Не вдалося відкрити примітку", show_alert=True)
         return
@@ -1499,6 +1534,7 @@ async def handle_group_note_view(callback: types.CallbackQuery):
         group_id,
         edit=True,
         view_note_id=note_id,
+        page=page,
     )
     await callback.answer()
 
