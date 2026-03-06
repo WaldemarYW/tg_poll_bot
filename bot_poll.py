@@ -1629,6 +1629,24 @@ async def handle_note_input(message: types.Message):
             title or "Без назви",
             url,
         )
+        bot_username = await get_bot_username(message.bot)
+        referral_link = (
+            f"https://t.me/{bot_username}?start=ref_{message.from_user.id}_group_{group_id}_note_{note_id}"
+            if bot_username
+            else ""
+        )
+        group_title: Optional[str] = None
+        group_info = await fetch_group_info(group_id)
+        if group_info:
+            group_title = group_info[1]
+        await SHEETS_LOGGER.ensure_note_in_stats(
+            group_id=group_id,
+            group_title=group_title,
+            note_id=note_id,
+            note_title=title or "Без назви",
+            note_url=url,
+            referral_link=referral_link,
+        )
         await message.answer(f"Примітку збережено (ID: {note_id}).")
         await render_group_notes(message, message.from_user, group_id)
 

@@ -9,6 +9,7 @@ NO_NOTE_KEY = "__NO_NOTE__"
 INVALID_SHEET_CHARS_RE = re.compile(r"[\[\]:*?/\\]")
 MAX_SHEET_NAME_LEN = 95
 STATS_SUFFIX = "[Статистика]"
+REF_LINK_COL_IDX = 16  # Column P
 
 HEADERS = [
     "назва_примітки",
@@ -160,6 +161,42 @@ class SheetsReferralLogger:
                 exc,
             )
 
+    async def ensure_note_in_stats(
+        self,
+        *,
+        group_id: Optional[int],
+        group_title: Optional[str],
+        note_id: int,
+        note_title: str,
+        note_url: str,
+        referral_link: str,
+    ) -> None:
+        if not self.enabled:
+            return
+        if not self.spreadsheet_id or not self.service_account_json:
+            return
+        try:
+            async with self._lock:
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._ensure_note_in_stats_sync,
+                        group_id,
+                        group_title,
+                        note_id,
+                        note_title,
+                        note_url,
+                        referral_link,
+                    ),
+                    timeout=self.timeout_sec,
+                )
+        except Exception as exc:
+            self.logger.error(
+                "Failed to ensure note in stats sheet (group_id=%s note_id=%s): %s",
+                group_id,
+                note_id,
+                exc,
+            )
+
     def _append_row_sync(self, sheet_name: str, row: List[str]) -> None:
         spreadsheet = self._get_spreadsheet_sync()
         worksheet = self._get_or_create_worksheet_sync(spreadsheet, sheet_name)
@@ -256,6 +293,50 @@ class SheetsReferralLogger:
             [[note_title, note_id_str, note_url, 1]],
             value_input_option="USER_ENTERED",
         )
+
+    def _ensure_note_in_stats_sync(
+        self,
+        group_id: Optional[int],
+        group_title: Optional[str],
+        note_id: int,
+        note_title: str,
+        note_url: str,
+        referral_link: str,
+    ) -> None:
+        spreadsheet = self._get_spreadsheet_sync()
+        stats_sheet_name = sanitize_stats_sheet_name(group_id, group_title)
+        worksheet = self._get_or_create_stats_worksheet_sync(spreadsheet, stats_sheet_name)
+        self._ensure_stats_headers_sync(worksheet)
+
+        if not worksheet.cell(1, REF_LINK_COL_IDX).value:
+            worksheet.update_cell(1, REF_LINK_COL_IDX, "Реферальне посилання")
+
+        note_id_str = str(note_id)
+        title_clean = (note_title or "").strip() or NO_NOTE_KEY
+        url_clean = (note_url or "").strip()
+        link_clean = (referral_link or "").strip()
+        rows = worksheet.get_all_values()
+
+        for idx, row in enumerate(rows[1:], start=2):
+            existing_id = row[1].strip() if len(row) > 1 else ""
+            if existing_id == note_id_str:
+                worksheet.update(
+                    f"A{idx}:C{idx}",
+                    [[title_clean, note_id_str, url_clean]],
+                    value_input_option="USER_ENTERED",
+                )
+                if link_clean:
+                    worksheet.update_cell(idx, REF_LINK_COL_IDX, link_clean)
+                return
+
+        target_row = self._find_first_free_stats_row(rows)
+        worksheet.update(
+            f"A{target_row}:D{target_row}",
+            [[title_clean, note_id_str, url_clean, 0]],
+            value_input_option="USER_ENTERED",
+        )
+        if link_clean:
+            worksheet.update_cell(target_row, REF_LINK_COL_IDX, link_clean)
 
     @staticmethod
     def _find_first_free_stats_row(rows: List[List[str]]) -> int:
