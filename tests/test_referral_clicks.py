@@ -72,7 +72,7 @@ class TestReferralClicks(unittest.IsolatedAsyncioTestCase):
 
     async def test_update_poll_response_does_not_reset_notified_on_device_update(self):
         await bot_poll.ensure_poll_row(user_id=654, referrer_id=100, note_id=1, group_id=99)
-        await bot_poll.update_poll_response(user_id=654, age="18-24")
+        await bot_poll.update_poll_response(user_id=654, age="16-24")
         await bot_poll.mark_notified(654)
 
         await bot_poll.update_poll_response(user_id=654, device="Так, є")

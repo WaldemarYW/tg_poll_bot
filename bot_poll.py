@@ -46,7 +46,7 @@ SHEETS_LOGGER = SheetsReferralLogger(
 )
 
 AGE_OPTIONS: Dict[str, str] = {
-    "18-24": "18-24",
+    "16-24": "16-24",
     "25-30": "25-30",
     "31-40": "31-40",
     "41_plus": "41+",
