@@ -10,7 +10,13 @@ import aiosqlite
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import BaseFilter, Command, CommandStart
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 from dotenv import load_dotenv
 from html import escape
 from google_sheets_logger import SheetsReferralEvent, SheetsReferralLogger, NO_NOTE_KEY
@@ -66,6 +72,10 @@ DEVICE_OPTIONS: Dict[str, str] = {
 
 REMINDER_TASKS: Dict[int, asyncio.Task] = {}
 REMINDER_EDITORS: set[int] = set()
+PHONE_CONTACT_WAITERS: set[int] = set()
+PHONE_CONTACT_TIMEOUT_TASKS: Dict[int, asyncio.Task] = {}
+CONTACT_WRITE_TEXT = "Написати"
+PHONE_CONTACT_TIMEOUT_SEC = 300
 DEFAULT_REMINDER_TEXT = (
     "Ти вже сьогодні зможеш, пройти навчання та отримати перші кошти, "
     "навчання багато часу не займе - пиши менеджеру Володимиру👇\n"
@@ -81,6 +91,25 @@ class PendingNoteCreationFilter(BaseFilter):
 class ReminderEditFilter(BaseFilter):
     async def __call__(self, message: types.Message) -> bool:
         return message.from_user.id in REMINDER_EDITORS
+
+
+class PendingPhoneContactFilter(BaseFilter):
+    async def __call__(self, message: types.Message) -> bool:
+        return message.from_user.id in PHONE_CONTACT_WAITERS
+
+
+def set_phone_contact_waiter(user_id: int) -> None:
+    PHONE_CONTACT_WAITERS.add(user_id)
+
+
+def clear_phone_contact_waiter(user_id: int) -> None:
+    PHONE_CONTACT_WAITERS.discard(user_id)
+
+
+def cancel_phone_contact_timeout(user_id: int) -> None:
+    task = PHONE_CONTACT_TIMEOUT_TASKS.pop(user_id, None)
+    if task and not task.done():
+        task.cancel()
 
 
 async def send_with_delay(
@@ -128,6 +157,17 @@ def build_manager_button() -> InlineKeyboardMarkup:
                 )
             ]
         ]
+    )
+
+
+def build_contact_request_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Поділитися номером", request_contact=True)],
+            [KeyboardButton(text=CONTACT_WRITE_TEXT)],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
     )
 
 
@@ -299,6 +339,10 @@ async def init_db():
         )
         try:
             await db.execute("ALTER TABLE poll_responses ADD COLUMN group_id INTEGER")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            await db.execute("ALTER TABLE poll_responses ADD COLUMN phone_number TEXT")
         except sqlite3.OperationalError:
             pass
         await db.execute(
@@ -547,6 +591,7 @@ async def update_poll_response(
     age: Optional[str] = None,
     income: Optional[str] = None,
     device: Optional[str] = None,
+    phone_number: Optional[str] = None,
 ):
     referrer_id = await get_referrer_id(user_id)
     await ensure_poll_row(user_id, referrer_id)
@@ -562,6 +607,9 @@ async def update_poll_response(
     if device is not None:
         updates.append("device = ?")
         params.append(device)
+    if phone_number is not None:
+        updates.append("phone_number = ?")
+        params.append(phone_number)
 
     if not updates:
         return
@@ -779,6 +827,71 @@ def cancel_reminder_task(user_id: int):
         task.cancel()
 
 
+async def remove_contact_keyboard_to_chat(
+    bot: Bot,
+    chat_id: int,
+    text: str = "Добре.",
+) -> None:
+    await bot.send_message(chat_id, text, reply_markup=ReplyKeyboardRemove())
+
+
+async def send_manager_contact_to_chat(
+    bot: Bot,
+    chat_id: int,
+    skip_delay: bool = False,
+):
+    await send_with_delay(
+        bot.send_message,
+        chat_id=chat_id,
+        text=(
+            "Надаю вам контакт менеджера Володимира - @hr_volodymyr🧑🏻‍💻 "
+            "Відправ йому «+» і він розповість вам про роботу, та буде допомагати в подальшому!🚀"
+        ),
+        reply_markup=build_manager_button(),
+        skip_delay=skip_delay,
+    )
+
+
+async def finalize_phone_contact_wait(
+    *,
+    bot: Bot,
+    user_id: int,
+    chat_id: int,
+    send_manager: bool = True,
+    remove_keyboard_text: Optional[str] = "Добре.",
+) -> None:
+    cancel_phone_contact_timeout(user_id)
+    clear_phone_contact_waiter(user_id)
+    if remove_keyboard_text is not None:
+        await remove_contact_keyboard_to_chat(bot, chat_id, text=remove_keyboard_text)
+    await notify_group_about_poll(bot, user_id)
+    if send_manager:
+        await send_manager_contact_to_chat(bot, chat_id, skip_delay=True)
+
+
+async def schedule_phone_contact_timeout(bot: Bot, user_id: int, chat_id: int):
+    cancel_phone_contact_timeout(user_id)
+
+    async def timeout_worker():
+        try:
+            await asyncio.sleep(PHONE_CONTACT_TIMEOUT_SEC)
+            if user_id not in PHONE_CONTACT_WAITERS:
+                return
+            await finalize_phone_contact_wait(
+                bot=bot,
+                user_id=user_id,
+                chat_id=chat_id,
+                send_manager=True,
+                remove_keyboard_text="Добре.",
+            )
+        except asyncio.CancelledError:
+            pass
+        finally:
+            PHONE_CONTACT_TIMEOUT_TASKS.pop(user_id, None)
+
+    PHONE_CONTACT_TIMEOUT_TASKS[user_id] = asyncio.create_task(timeout_worker())
+
+
 async def schedule_reminder(bot: Bot, user_id: int, chat_id: int):
     cancel_reminder_task(user_id)
 
@@ -839,6 +952,64 @@ def format_user_reference(
     return f"ID: {user_id}"
 
 
+def build_group_lead_message(
+    *,
+    poll_row: aiosqlite.Row,
+    user_row: Optional[aiosqlite.Row],
+    user_id: int,
+    referrer_row: Optional[aiosqlite.Row],
+    referrer_id: Optional[int],
+    note_row: Optional[aiosqlite.Row],
+    note_id: Optional[int],
+) -> str:
+    lines = [
+        "✴️ НОВА АНКЕТА",
+        "",
+        f"ℹ️ Користувач: {format_user_reference(user_row, user_id)}",
+    ]
+
+    phone_number = poll_row["phone_number"] or ""
+    if phone_number:
+        lines.extend(
+            [
+                "",
+                f"☎️ Номер телефону: {phone_number}",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            f"⏳ Вік: {poll_row['age'] or '—'}",
+            "",
+            f"💰 Бажаний дохід: {poll_row['income'] or '—'}",
+            "",
+            f"💻 Ноутбук: {poll_row['device'] or '—'}",
+        ]
+    )
+
+    if note_id and note_row:
+        lines.extend(
+            [
+                "",
+                f"🪧 Примітка: {note_row['title']} [{note_id}]",
+            ]
+        )
+
+    if referrer_id:
+        referrer_text = format_user_reference(referrer_row, referrer_id)
+    else:
+        referrer_text = "чистий запуск"
+
+    lines.extend(
+        [
+            "",
+            f"📥 Реферал від: {referrer_text}",
+        ]
+    )
+    return "\n".join(lines)
+
+
 async def notify_group_about_poll(bot: Bot, user_id: int):
     poll_row = await fetch_poll_response(user_id)
     if not poll_row or not poll_row["device"]:
@@ -871,43 +1042,44 @@ async def notify_group_about_poll(bot: Bot, user_id: int):
     referrer_row = await fetch_user_record(referrer_id)
     user_row = await fetch_user_record(user_id)
 
-    lines = [
-        "🆕 Нова анкета від ліда",
-        f"Користувач: {format_user_reference(user_row, user_id)}",
-        f"Вік: {poll_row['age'] or '—'}",
-        f"Бажаний дохід: {poll_row['income'] or '—'}",
-        f"Ноутбук: {poll_row['device'] or '—'}",
-    ]
-
-    note_line = None
     note_id = poll_row["note_id"]
     note_row = None
     if note_id:
         note_row = await fetch_note(note_id)
-        if note_row:
-            note_line = f"Примітка: {note_row['title']}"
-            if note_row["url"]:
-                note_line += f" ({note_row['url']})"
-
-    if note_line:
-        lines.append(note_line)
-
-    if user_row and user_row["username"]:
-        lines.append(f"Профіль користувача: https://t.me/{user_row['username']}")
-    else:
-        lines.append(f"Профіль користувача: tg://user?id={user_id}")
-
-    if referrer_id:
-        lines.append(f"Реферал від: {format_user_reference(referrer_row, referrer_id)}")
-    else:
-        lines.append("Реферал від: чистий запуск")
+    message_text = build_group_lead_message(
+        poll_row=poll_row,
+        user_row=user_row,
+        user_id=user_id,
+        referrer_row=referrer_row,
+        referrer_id=referrer_id,
+        note_row=note_row,
+        note_id=note_id,
+    )
 
     try:
-        await bot.send_message(group_info[0], "\n".join(lines))
+        await bot.send_message(group_info[0], message_text)
     except Exception:
         # Allow retry in case send failed after we claimed the notification.
         await unmark_notified(user_id)
         raise
+
+
+async def resolve_group_context(
+    *,
+    group_id: Optional[int],
+    referrer_id: Optional[int],
+) -> Tuple[Optional[int], Optional[str]]:
+    if group_id:
+        group_info = await fetch_group_info(group_id)
+        if group_info:
+            return group_info[0], group_info[1]
+
+    if referrer_id:
+        referrer_group = await get_user_group(referrer_id)
+        if referrer_group:
+            return referrer_group[0], referrer_group[1]
+
+    return group_id, None
 
 
 def extract_start_payload(message: types.Message) -> Optional[str]:
@@ -1332,6 +1504,8 @@ async def render_group_notes(
 
 async def cmd_start(message: types.Message):
     await upsert_user(message.from_user)
+    cancel_phone_contact_timeout(message.from_user.id)
+    clear_phone_contact_waiter(message.from_user.id)
     payload = extract_start_payload(message)
     handled_referral = await handle_referral_payload(payload, message.from_user)
     group_id = None
@@ -1363,11 +1537,15 @@ async def cmd_start(message: types.Message):
 
 async def cmd_poll(message: types.Message):
     await upsert_user(message.from_user)
+    cancel_phone_contact_timeout(message.from_user.id)
+    clear_phone_contact_waiter(message.from_user.id)
     await send_age_question(message.bot, message.chat.id, skip_delay=True)
 
 
 async def cmd_ref(message: types.Message):
     await upsert_user(message.from_user)
+    cancel_phone_contact_timeout(message.from_user.id)
+    clear_phone_contact_waiter(message.from_user.id)
     await render_ref_dashboard(message, message.from_user)
 
 
@@ -1441,15 +1619,81 @@ async def handle_device_choice(callback: types.CallbackQuery):
             skip_delay=True,
         )
 
-    await notify_group_about_poll(callback.message.bot, callback.from_user.id)
-    await send_manager_prompt(callback.message)
+    if callback.from_user.username:
+        await notify_group_about_poll(callback.message.bot, callback.from_user.id)
+        await send_manager_prompt(callback.message)
+    else:
+        set_phone_contact_waiter(callback.from_user.id)
+        await send_phone_contact_prompt(callback.message)
+        await schedule_phone_contact_timeout(
+            callback.message.bot,
+            callback.from_user.id,
+            callback.message.chat.id,
+        )
     await callback.answer()
 
 
 async def handle_manager_prompt(callback: types.CallbackQuery):
     await upsert_user(callback.from_user)
+    if callback.from_user.id in PHONE_CONTACT_WAITERS:
+        await finalize_phone_contact_wait(
+            bot=callback.message.bot,
+            user_id=callback.from_user.id,
+            chat_id=callback.message.chat.id,
+            send_manager=False,
+            remove_keyboard_text="Добре.",
+        )
     await send_manager_contact(callback.message, skip_delay=True)
     await callback.answer()
+
+
+async def handle_phone_contact(message: types.Message):
+    contact = message.contact
+    if not contact or contact.user_id != message.from_user.id:
+        await message.answer("Поділіться саме своїм контактом кнопкою нижче або натисніть «Написати».")
+        return
+
+    await upsert_user(message.from_user)
+    cancel_phone_contact_timeout(message.from_user.id)
+    clear_phone_contact_waiter(message.from_user.id)
+    await update_poll_response(message.from_user.id, phone_number=contact.phone_number or "")
+    await remove_contact_keyboard(message, text="Дякую! Контакт отримано.")
+
+    poll_row = await fetch_poll_response(message.from_user.id)
+    if poll_row:
+        resolved_group_id, resolved_group_title = await resolve_group_context(
+            group_id=poll_row["group_id"],
+            referrer_id=poll_row["referrer_id"],
+        )
+        await SHEETS_LOGGER.update_referral_phone_number(
+            group_id=resolved_group_id,
+            group_title=resolved_group_title,
+            referrer_id=poll_row["referrer_id"],
+            referred_user_id=message.from_user.id,
+            note_id=poll_row["note_id"],
+            phone_number=contact.phone_number or "",
+        )
+
+    await notify_group_about_poll(message.bot, message.from_user.id)
+    await send_manager_contact(message, skip_delay=True)
+
+
+async def handle_phone_contact_text(message: types.Message):
+    text = (message.text or "").strip()
+    if text.startswith("/"):
+        return
+
+    if text == CONTACT_WRITE_TEXT:
+        await finalize_phone_contact_wait(
+            bot=message.bot,
+            user_id=message.from_user.id,
+            chat_id=message.chat.id,
+            send_manager=True,
+            remove_keyboard_text="Добре.",
+        )
+        return
+
+    await message.answer("Натисніть «Поділитися номером» або «Написати».")
 
 
 async def handle_group_selection(callback: types.CallbackQuery):
@@ -1767,14 +2011,25 @@ async def send_manager_prompt(message: types.Message, skip_delay: bool = False):
     )
 
 
-async def send_manager_contact(message: types.Message, skip_delay: bool = False):
+async def send_phone_contact_prompt(message: types.Message, skip_delay: bool = False):
     await send_with_delay(
         message.answer,
-        "Надаю вам контакт менеджера Володимира - @hr_volodymyr🧑🏻‍💻 "
-        "Відправ йому «+» і він розповість вам про роботу, та буде допомагати в подальшому!🚀",
-        reply_markup=build_manager_button(),
+        "Поділіться контактом та наш менеджер напише вам, або напишіть йому самі.",
+        reply_markup=build_contact_request_keyboard(),
         skip_delay=skip_delay,
     )
+
+
+async def send_manager_contact(message: types.Message, skip_delay: bool = False):
+    await send_manager_contact_to_chat(
+        message.bot,
+        message.chat.id,
+        skip_delay=skip_delay,
+    )
+
+
+async def remove_contact_keyboard(message: types.Message, text: str = "Дякую!") -> None:
+    await message.answer(text, reply_markup=ReplyKeyboardRemove())
 
 
 async def main():
@@ -1794,6 +2049,8 @@ async def main():
     dp.message.register(cmd_start, CommandStart())
     dp.message.register(cmd_poll, Command("poll"))
     dp.message.register(cmd_ref, Command("ref"))
+    dp.message.register(handle_phone_contact, PendingPhoneContactFilter(), F.contact)
+    dp.message.register(handle_phone_contact_text, PendingPhoneContactFilter())
     dp.message.register(track_group_presence, F.chat.type.in_({"group", "supergroup"}))
 
     dp.callback_query.register(handle_contact_manager, F.data == "contact_manager")

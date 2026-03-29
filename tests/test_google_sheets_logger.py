@@ -49,8 +49,9 @@ class TestGoogleSheetsLogger(unittest.TestCase):
             event_ts_utc="2026-02-23T15:04:05Z",
         )
         self.assertEqual(row[0], NO_NOTE_KEY)
-        self.assertEqual(row[4], "")
+        self.assertEqual(row[5], "")
         self.assertEqual(row[2], "")
+        self.assertEqual(row[3], "")
 
     def test_build_event_row_adds_usernames_when_present(self):
         event = SheetsReferralEvent(
@@ -69,8 +70,28 @@ class TestGoogleSheetsLogger(unittest.TestCase):
             sheet_name="Group [1]",
             event_ts_utc="2026-02-23T15:04:05Z",
         )
-        self.assertEqual(row[8], "@ref_user")
+        self.assertEqual(row[9], "@ref_user")
         self.assertEqual(row[2], "@lead_user")
+
+    def test_build_event_row_adds_phone_when_present(self):
+        event = SheetsReferralEvent(
+            group_id=1,
+            group_title="Group",
+            referrer_id=10,
+            referrer_username="ref_user",
+            referred_user_id=20,
+            referred_username="lead_user",
+            note_id=30,
+            note_title="Note",
+            note_url="",
+            referred_phone_number="+380991112233",
+        )
+        row = SheetsReferralLogger.build_event_row(
+            event,
+            sheet_name="Group [1]",
+            event_ts_utc="2026-02-23T15:04:05Z",
+        )
+        self.assertEqual(row[3], "+380991112233")
 
     def test_find_first_free_stats_row_uses_abc_only(self):
         rows = [
@@ -109,6 +130,25 @@ class TestGoogleSheetsLoggerAsync(unittest.IsolatedAsyncioTestCase):
         await logger.log_referral_click_event(event)
         logger._append_row_sync.assert_called_once()
         logger._upsert_stats_sheet_sync.assert_called_once()
+
+    async def test_update_referral_phone_number_calls_sync_helper(self):
+        logger = SheetsReferralLogger(
+            enabled=True,
+            spreadsheet_id="sheet-id",
+            service_account_json="/tmp/fake.json",
+            timeout_sec=1,
+        )
+        logger._update_referral_phone_number_sync = MagicMock()
+
+        await logger.update_referral_phone_number(
+            group_id=1,
+            group_title="Team A",
+            referrer_id=10,
+            referred_user_id=20,
+            note_id=30,
+            phone_number="+380991112233",
+        )
+        logger._update_referral_phone_number_sync.assert_called_once()
 
 
 if __name__ == "__main__":

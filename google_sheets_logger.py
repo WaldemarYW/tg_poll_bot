@@ -15,6 +15,7 @@ HEADERS = [
     "назва_примітки",
     "посилання_примітки",
     "юзернейм_запрошеного",
+    "номер_телефону",
     "час_події_utc",
     "id_примітки",
     "id_групи",
@@ -78,6 +79,7 @@ class SheetsReferralEvent:
     note_id: Optional[int]
     note_title: Optional[str]
     note_url: Optional[str]
+    referred_phone_number: Optional[str] = None
     source: str = "ref_link"
 
 
@@ -108,10 +110,12 @@ class SheetsReferralLogger:
         note_url = (event.note_url or "").strip()
         referrer_username = (event.referrer_username or "").strip()
         referred_username = (event.referred_username or "").strip()
+        referred_phone_number = (event.referred_phone_number or "").strip()
         return [
             note_title,
             note_url,
             f"@{referred_username}" if referred_username else "",
+            referred_phone_number,
             event_ts_utc,
             str(event.note_id) if event.note_id is not None else "",
             str(event.group_id) if event.group_id is not None else "",
@@ -197,6 +201,45 @@ class SheetsReferralLogger:
                 exc,
             )
 
+    async def update_referral_phone_number(
+        self,
+        *,
+        group_id: Optional[int],
+        group_title: Optional[str],
+        referrer_id: Optional[int],
+        referred_user_id: int,
+        note_id: Optional[int],
+        phone_number: str,
+    ) -> None:
+        if not self.enabled:
+            return
+        if not self.spreadsheet_id or not self.service_account_json or not phone_number:
+            return
+        try:
+            async with self._lock:
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._update_referral_phone_number_sync,
+                        group_id,
+                        group_title,
+                        referrer_id,
+                        referred_user_id,
+                        note_id,
+                        phone_number,
+                    ),
+                    timeout=self.timeout_sec,
+                )
+        except Exception as exc:
+            self.logger.error(
+                "Failed to update phone number in Google Sheets "
+                "(group_id=%s referrer_id=%s referred_user_id=%s note_id=%s): %s",
+                group_id,
+                referrer_id,
+                referred_user_id,
+                note_id,
+                exc,
+            )
+
     def _append_row_sync(self, sheet_name: str, row: List[str]) -> None:
         spreadsheet = self._get_spreadsheet_sync()
         worksheet = self._get_or_create_worksheet_sync(spreadsheet, sheet_name)
@@ -207,6 +250,47 @@ class SheetsReferralLogger:
             insert_data_option="INSERT_ROWS",
             table_range="A1",
         )
+
+    def _update_referral_phone_number_sync(
+        self,
+        group_id: Optional[int],
+        group_title: Optional[str],
+        referrer_id: Optional[int],
+        referred_user_id: int,
+        note_id: Optional[int],
+        phone_number: str,
+    ) -> None:
+        spreadsheet = self._get_spreadsheet_sync()
+        sheet_name = sanitize_sheet_name(group_id, group_title)
+        worksheet = self._get_or_create_worksheet_sync(spreadsheet, sheet_name)
+        self._ensure_headers_sync(worksheet)
+
+        rows = worksheet.get_all_values()
+        referrer_id_str = str(referrer_id) if referrer_id is not None else ""
+        referred_user_id_str = str(referred_user_id)
+        note_id_str = str(note_id) if note_id is not None else ""
+        group_id_str = str(group_id) if group_id is not None else ""
+
+        for idx in range(len(rows) - 1, 0, -1):
+            row = rows[idx]
+            existing_note_id = row[5].strip() if len(row) > 5 else ""
+            existing_group_id = row[6].strip() if len(row) > 6 else ""
+            existing_referrer_id = row[8].strip() if len(row) > 8 else ""
+            existing_referred_user_id = row[10].strip() if len(row) > 10 else ""
+            if (
+                existing_note_id == note_id_str
+                and existing_group_id == group_id_str
+                and existing_referrer_id == referrer_id_str
+                and existing_referred_user_id == referred_user_id_str
+            ):
+                worksheet.update(
+                    f"D{idx + 1}",
+                    [[phone_number]],
+                    value_input_option="RAW",
+                )
+                return
+
+        raise RuntimeError("Referral row for phone update was not found")
 
     def _get_spreadsheet_sync(self):
         if self._spreadsheet is not None:

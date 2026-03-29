@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 try:
     import bot_poll
@@ -23,6 +24,8 @@ class TestReferralClicks(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         bot_poll.DB_PATH = self.original_db_path
+        bot_poll.PHONE_CONTACT_WAITERS.clear()
+        bot_poll.PHONE_CONTACT_TIMEOUT_TASKS.clear()
         if self.temp_db_path.exists():
             self.temp_db_path.unlink()
 
@@ -78,6 +81,109 @@ class TestReferralClicks(unittest.IsolatedAsyncioTestCase):
         await bot_poll.update_poll_response(user_id=654, device="Так, є")
 
         self.assertTrue(await bot_poll.was_notified(654))
+
+    async def test_init_db_adds_phone_number_column(self):
+        async with bot_poll.aiosqlite.connect(bot_poll.DB_PATH) as db:
+            async with db.execute("PRAGMA table_info(poll_responses)") as cursor:
+                columns = [row[1] async for row in cursor]
+
+        self.assertIn("phone_number", columns)
+
+    async def test_finalize_phone_contact_wait_clears_waiter_and_timeout(self):
+        bot_poll.set_phone_contact_waiter(777)
+        timeout_task = MagicMock()
+        timeout_task.done.return_value = False
+        bot_poll.PHONE_CONTACT_TIMEOUT_TASKS[777] = timeout_task
+
+        with patch.object(bot_poll, "remove_contact_keyboard_to_chat", new=AsyncMock()) as remove_mock, \
+            patch.object(bot_poll, "notify_group_about_poll", new=AsyncMock()) as notify_mock, \
+            patch.object(bot_poll, "send_manager_contact_to_chat", new=AsyncMock()) as manager_mock:
+            await bot_poll.finalize_phone_contact_wait(
+                bot=AsyncMock(),
+                user_id=777,
+                chat_id=888,
+                send_manager=True,
+                remove_keyboard_text="Добре.",
+            )
+
+        self.assertNotIn(777, bot_poll.PHONE_CONTACT_WAITERS)
+        self.assertNotIn(777, bot_poll.PHONE_CONTACT_TIMEOUT_TASKS)
+        timeout_task.cancel.assert_called_once()
+        remove_mock.assert_awaited_once()
+        notify_mock.assert_awaited_once()
+        manager_mock.assert_awaited_once()
+
+    async def test_build_group_lead_message_formats_note_without_url(self):
+        poll_row = {
+            "age": "16-24",
+            "income": "30-50 тис",
+            "device": "Так, є",
+            "phone_number": "+380991112233",
+        }
+        user_row = {
+            "username": "dominika_103",
+            "first_name": None,
+            "last_name": None,
+        }
+        referrer_row = {
+            "username": "hr_volodymyr",
+            "first_name": None,
+            "last_name": None,
+        }
+        note_row = {
+            "title": "Вакансії на дому",
+            "url": "https://example.com",
+        }
+
+        message = bot_poll.build_group_lead_message(
+            poll_row=poll_row,
+            user_row=user_row,
+            user_id=111,
+            referrer_row=referrer_row,
+            referrer_id=222,
+            note_row=note_row,
+            note_id=123,
+        )
+
+        self.assertIn("✴️ НОВА АНКЕТА", message)
+        self.assertIn("ℹ️ Користувач: @dominika_103", message)
+        self.assertIn("☎️ Номер телефону: +380991112233", message)
+        self.assertIn("⏳ Вік: 16-24", message)
+        self.assertIn("💰 Бажаний дохід: 30-50 тис", message)
+        self.assertIn("💻 Ноутбук: Так, є", message)
+        self.assertIn("🪧 Примітка: Вакансії на дому [123]", message)
+        self.assertIn("📥 Реферал від: @hr_volodymyr", message)
+        self.assertNotIn("https://example.com", message)
+        self.assertNotIn("Профіль користувача", message)
+
+    async def test_build_group_lead_message_hides_note_when_missing(self):
+        poll_row = {
+            "age": "25-30",
+            "income": "20-30 тис",
+            "device": "Ні, немає",
+            "phone_number": None,
+        }
+        user_row = {
+            "username": None,
+            "first_name": "Test",
+            "last_name": "User",
+        }
+
+        message = bot_poll.build_group_lead_message(
+            poll_row=poll_row,
+            user_row=user_row,
+            user_id=333,
+            referrer_row=None,
+            referrer_id=None,
+            note_row=None,
+            note_id=None,
+        )
+
+        self.assertIn("ℹ️ Користувач: Test User (ID: 333)", message)
+        self.assertIn("📥 Реферал від: чистий запуск", message)
+        self.assertNotIn("🪧 Примітка:", message)
+        self.assertNotIn("Профіль користувача", message)
+        self.assertNotIn("☎️ Номер телефону:", message)
 
 
 if __name__ == "__main__":
