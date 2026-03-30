@@ -185,6 +185,34 @@ class TestReferralClicks(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Профіль користувача", message)
         self.assertNotIn("☎️ Номер телефону:", message)
 
+    async def test_normalize_phone_number_keeps_valid_plus_380(self):
+        self.assertEqual(
+            bot_poll.normalize_phone_number("+380991112233"),
+            "+380991112233",
+        )
+
+    async def test_normalize_phone_number_adds_plus_3_to_380(self):
+        self.assertEqual(
+            bot_poll.normalize_phone_number("380991112233"),
+            "+380991112233",
+        )
+
+    async def test_normalize_phone_number_adds_plus_3_to_80(self):
+        self.assertEqual(
+            bot_poll.normalize_phone_number("80991112233"),
+            "+380991112233",
+        )
+
+    async def test_normalize_phone_number_cleans_spaces_and_keeps_foreign_number(self):
+        self.assertEqual(
+            bot_poll.normalize_phone_number("38 099 111 22 33"),
+            "+380991112233",
+        )
+        self.assertEqual(
+            bot_poll.normalize_phone_number("+49 (151) 123-45-67"),
+            "+491511234567",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

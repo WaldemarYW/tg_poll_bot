@@ -952,6 +952,20 @@ def format_user_reference(
     return f"ID: {user_id}"
 
 
+def normalize_phone_number(raw: str) -> str:
+    cleaned = (raw or "").strip()
+    for token in (" ", "(", ")", "-"):
+        cleaned = cleaned.replace(token, "")
+
+    if cleaned.startswith("+380"):
+        return cleaned
+    if cleaned.startswith("380"):
+        return f"+3{cleaned}"
+    if cleaned.startswith("80"):
+        return f"+3{cleaned}"
+    return cleaned
+
+
 def build_group_lead_message(
     *,
     poll_row: aiosqlite.Row,
@@ -1656,7 +1670,8 @@ async def handle_phone_contact(message: types.Message):
     await upsert_user(message.from_user)
     cancel_phone_contact_timeout(message.from_user.id)
     clear_phone_contact_waiter(message.from_user.id)
-    await update_poll_response(message.from_user.id, phone_number=contact.phone_number or "")
+    normalized_phone_number = normalize_phone_number(contact.phone_number or "")
+    await update_poll_response(message.from_user.id, phone_number=normalized_phone_number)
     await remove_contact_keyboard(message, text="Дякую! Контакт отримано.")
 
     poll_row = await fetch_poll_response(message.from_user.id)
@@ -1671,7 +1686,7 @@ async def handle_phone_contact(message: types.Message):
             referrer_id=poll_row["referrer_id"],
             referred_user_id=message.from_user.id,
             note_id=poll_row["note_id"],
-            phone_number=contact.phone_number or "",
+            phone_number=normalized_phone_number,
         )
 
     await notify_group_about_poll(message.bot, message.from_user.id)
