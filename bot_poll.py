@@ -960,7 +960,7 @@ def normalize_phone_number(raw: str) -> str:
     if cleaned.startswith("+380"):
         return cleaned
     if cleaned.startswith("380"):
-        return f"+3{cleaned}"
+        return f"+{cleaned}"
     if cleaned.startswith("80"):
         return f"+3{cleaned}"
     return cleaned
