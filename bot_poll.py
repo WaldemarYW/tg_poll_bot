@@ -1026,6 +1026,14 @@ async def resolve_manager_username_for_user(user_id: int) -> str:
     return DEFAULT_MANAGER_USERNAME
 
 
+def resolve_manager_username_for_note(note_row: Optional[aiosqlite.Row]) -> str:
+    if note_row:
+        normalized = normalize_manager_username(note_row["url"])
+        if normalized:
+            return normalized
+    return DEFAULT_MANAGER_USERNAME
+
+
 def build_group_lead_message(
     *,
     poll_row: aiosqlite.Row,
@@ -1063,10 +1071,13 @@ def build_group_lead_message(
     )
 
     if note_id and note_row:
+        manager_username = resolve_manager_username_for_note(note_row)
         lines.extend(
             [
                 "",
                 f"🪧 Примітка: {note_row['title']} [{note_id}]",
+                "",
+                f"👤 HR: {manager_username}",
             ]
         )
 
@@ -1630,7 +1641,7 @@ async def cmd_ref(message: types.Message):
 
 async def handle_contact_manager(callback: types.CallbackQuery):
     await upsert_user(callback.from_user)
-    await send_manager_contact(callback.message, skip_delay=True)
+    await send_manager_contact(callback.message, user_id=callback.from_user.id, skip_delay=True)
     await callback.answer()
 
 
@@ -1722,7 +1733,7 @@ async def handle_manager_prompt(callback: types.CallbackQuery):
             send_manager=False,
             remove_keyboard_text="Добре.",
         )
-    await send_manager_contact(callback.message, skip_delay=True)
+    await send_manager_contact(callback.message, user_id=callback.from_user.id, skip_delay=True)
     await callback.answer()
 
 
@@ -2104,11 +2115,15 @@ async def send_phone_contact_prompt(message: types.Message, skip_delay: bool = F
     )
 
 
-async def send_manager_contact(message: types.Message, skip_delay: bool = False):
+async def send_manager_contact(
+    message: types.Message,
+    user_id: Optional[int] = None,
+    skip_delay: bool = False,
+):
     await send_manager_contact_to_chat(
         message.bot,
         message.chat.id,
-        message.from_user.id,
+        user_id if user_id is not None else message.from_user.id,
         skip_delay=skip_delay,
     )
 

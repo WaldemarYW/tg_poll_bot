@@ -113,7 +113,7 @@ class TestReferralClicks(unittest.IsolatedAsyncioTestCase):
         notify_mock.assert_awaited_once()
         manager_mock.assert_awaited_once()
 
-    async def test_build_group_lead_message_formats_note_without_url(self):
+    async def test_build_group_lead_message_uses_default_hr_for_legacy_note_url(self):
         poll_row = {
             "age": "16-24",
             "income": "30-50 тис",
@@ -152,9 +152,50 @@ class TestReferralClicks(unittest.IsolatedAsyncioTestCase):
         self.assertIn("💰 Бажаний дохід: 30-50 тис", message)
         self.assertIn("💻 Ноутбук: Так, є", message)
         self.assertIn("🪧 Примітка: Вакансії на дому [123]", message)
+        self.assertIn("👤 HR: @hr_volodymyr", message)
         self.assertIn("📥 Реферал від: @hr_volodymyr", message)
         self.assertNotIn("https://example.com", message)
         self.assertNotIn("Профіль користувача", message)
+        self.assertLess(message.index("🪧 Примітка:"), message.index("👤 HR:"))
+        self.assertLess(message.index("👤 HR:"), message.index("📥 Реферал від:"))
+
+    async def test_build_group_lead_message_uses_note_manager_username_for_hr(self):
+        poll_row = {
+            "age": "16-24",
+            "income": "30-50 тис",
+            "device": "Так, є",
+            "phone_number": None,
+        }
+        user_row = {
+            "username": "dominika_103",
+            "first_name": None,
+            "last_name": None,
+        }
+        referrer_row = {
+            "username": "hr_volodymyr",
+            "first_name": None,
+            "last_name": None,
+        }
+        note_row = {
+            "title": "Робота на дому",
+            "url": "@custom_manager",
+        }
+
+        message = bot_poll.build_group_lead_message(
+            poll_row=poll_row,
+            user_row=user_row,
+            user_id=111,
+            referrer_row=referrer_row,
+            referrer_id=222,
+            note_row=note_row,
+            note_id=52,
+        )
+
+        self.assertIn("🪧 Примітка: Робота на дому [52]", message)
+        self.assertIn("👤 HR: @custom_manager", message)
+        self.assertIn("📥 Реферал від: @hr_volodymyr", message)
+        self.assertLess(message.index("🪧 Примітка:"), message.index("👤 HR:"))
+        self.assertLess(message.index("👤 HR:"), message.index("📥 Реферал від:"))
 
     async def test_build_group_lead_message_hides_note_when_missing(self):
         poll_row = {
@@ -182,6 +223,7 @@ class TestReferralClicks(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ℹ️ Користувач: Test User (ID: 333)", message)
         self.assertIn("📥 Реферал від: чистий запуск", message)
         self.assertNotIn("🪧 Примітка:", message)
+        self.assertNotIn("👤 HR:", message)
         self.assertNotIn("Профіль користувача", message)
         self.assertNotIn("☎️ Номер телефону:", message)
 
@@ -300,6 +342,22 @@ class TestReferralClicks(unittest.IsolatedAsyncioTestCase):
         button = kwargs["reply_markup"].inline_keyboard[0][0]
         self.assertEqual(button.text, "Написати менеджеру✅")
         self.assertEqual(button.url, "https://t.me/custom_manager?text=%2B")
+
+    async def test_send_manager_contact_uses_explicit_user_id(self):
+        message = MagicMock()
+        message.bot = MagicMock()
+        message.chat.id = 777
+        message.from_user.id = 111
+
+        with patch.object(bot_poll, "send_manager_contact_to_chat", new=AsyncMock()) as send_mock:
+            await bot_poll.send_manager_contact(message, user_id=222, skip_delay=True)
+
+        send_mock.assert_awaited_once_with(
+            message.bot,
+            777,
+            222,
+            skip_delay=True,
+        )
 
 
 if __name__ == "__main__":
