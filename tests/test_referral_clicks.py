@@ -228,6 +228,29 @@ class TestReferralClicks(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(bot_poll.normalize_manager_username("https://example.com"))
 
+    async def test_normalize_note_contact_input_uses_default_for_dash(self):
+        self.assertEqual(
+            bot_poll.normalize_note_contact_input("-"),
+            bot_poll.DEFAULT_MANAGER_USERNAME,
+        )
+        self.assertEqual(
+            bot_poll.normalize_note_contact_input(""),
+            bot_poll.DEFAULT_MANAGER_USERNAME,
+        )
+
+    async def test_normalize_note_contact_input_accepts_username(self):
+        self.assertEqual(
+            bot_poll.normalize_note_contact_input("custom_manager"),
+            "@custom_manager",
+        )
+        self.assertEqual(
+            bot_poll.normalize_note_contact_input("@custom_manager"),
+            "@custom_manager",
+        )
+        self.assertIsNone(
+            bot_poll.normalize_note_contact_input("https://example.com"),
+        )
+
     async def test_resolve_manager_username_for_user_uses_note_username(self):
         await bot_poll.ensure_poll_row(user_id=501, referrer_id=100, note_id=1, group_id=99)
 

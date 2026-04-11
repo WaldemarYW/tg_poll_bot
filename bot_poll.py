@@ -997,6 +997,13 @@ def normalize_manager_username(raw: Optional[str]) -> Optional[str]:
     return f"@{cleaned}" if MANAGER_USERNAME_RE.fullmatch(cleaned) else None
 
 
+def normalize_note_contact_input(raw: Optional[str]) -> Optional[str]:
+    cleaned = (raw or "").strip()
+    if not cleaned or cleaned in {"-", "—"}:
+        return DEFAULT_MANAGER_USERNAME
+    return normalize_manager_username(cleaned)
+
+
 def build_manager_url(manager_username: str) -> str:
     return f"https://t.me/{manager_username.lstrip('@')}?text=%2B"
 
@@ -1453,7 +1460,8 @@ async def render_group_notes(
 
         clicks = await count_note_clicks(note["id"])
         note_url_raw = note["url"] or ""
-        note_url_valid = is_valid_note_url(note_url_raw)
+        note_manager_username = normalize_manager_username(note_url_raw)
+        note_url_valid = is_valid_note_url(note_url_raw) and not note_manager_username
         referral_link = (
             f"https://t.me/{bot_username}?start=ref_{user.id}_group_{group_id}_note_{note['id']}"
             if bot_username
@@ -1462,7 +1470,11 @@ async def render_group_notes(
         lines = [
             f"Група: {safe_group_title}",
             f"Назва: {escape(note['title'])}",
-            f"Посилання: {escape(note_url_raw) if note_url_raw else '—'}",
+            (
+                f"Контакт менеджера: {escape(note_manager_username)}"
+                if note_manager_username
+                else f"Посилання: {escape(note_url_raw) if note_url_raw else '—'}"
+            ),
             f"Перегляди: {clicks}",
             "",
             f"Реф-посилання для примітки:\n<code>{escape(referral_link)}</code>",
@@ -1954,17 +1966,21 @@ async def handle_note_input(message: types.Message):
     step = state.get("step")
     if step == "title":
         state["title"] = text
-        state["step"] = "url"
-        await message.answer("Тепер надішліть посилання для примітки (або '-' якщо воно не потрібне).")
-    elif step == "url":
+        state["step"] = "manager_username"
+        await message.answer(
+            "Тепер надішліть username менеджера для цієї примітки у форматі @name або name.\n"
+            "Якщо залишити дефолтний контакт, надішліть '-'."
+        )
+    elif step == "manager_username":
         title = state.get("title")
-        if text != "-" and not is_valid_note_url(text):
+        manager_username = normalize_note_contact_input(text)
+        if not manager_username:
             await message.answer(
-                "Посилання має починатися з http://, https:// або tg://. "
-                "Надішліть валідне посилання або '-' якщо його не потрібно."
+                "Надішліть Telegram username у форматі @name або name. "
+                "Щоб використати дефолтний контакт, надішліть '-'."
             )
             return
-        url = text if text != "-" else ""
+        url = manager_username
         NOTE_CREATION_STATE.pop(message.from_user.id, None)
         group_id = state.get("group_id")
         if group_id is None:
