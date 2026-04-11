@@ -213,6 +213,71 @@ class TestReferralClicks(unittest.IsolatedAsyncioTestCase):
             "+491511234567",
         )
 
+    async def test_normalize_manager_username_variants(self):
+        self.assertEqual(
+            bot_poll.normalize_manager_username("@hr_volodymyr"),
+            "@hr_volodymyr",
+        )
+        self.assertEqual(
+            bot_poll.normalize_manager_username("hr_volodymyr"),
+            "@hr_volodymyr",
+        )
+        self.assertEqual(
+            bot_poll.normalize_manager_username("https://t.me/hr_volodymyr"),
+            "@hr_volodymyr",
+        )
+        self.assertIsNone(bot_poll.normalize_manager_username("https://example.com"))
+
+    async def test_resolve_manager_username_for_user_uses_note_username(self):
+        await bot_poll.ensure_poll_row(user_id=501, referrer_id=100, note_id=1, group_id=99)
+
+        async with bot_poll.aiosqlite.connect(bot_poll.DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO notes (id, owner_id, group_id, title, url) VALUES (?, ?, ?, ?, ?)",
+                (1, 100, 99, "Test note", "@custom_manager"),
+            )
+            await db.commit()
+
+        manager_username = await bot_poll.resolve_manager_username_for_user(501)
+        self.assertEqual(manager_username, "@custom_manager")
+
+    async def test_resolve_manager_username_for_user_falls_back_to_default(self):
+        await bot_poll.ensure_poll_row(user_id=502, referrer_id=100, note_id=1, group_id=99)
+
+        async with bot_poll.aiosqlite.connect(bot_poll.DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO notes (id, owner_id, group_id, title, url) VALUES (?, ?, ?, ?, ?)",
+                (1, 100, 99, "Old note", "https://example.com"),
+            )
+            await db.commit()
+
+        manager_username = await bot_poll.resolve_manager_username_for_user(502)
+        self.assertEqual(manager_username, bot_poll.DEFAULT_MANAGER_USERNAME)
+
+    async def test_send_manager_contact_to_chat_uses_note_username(self):
+        await bot_poll.ensure_poll_row(user_id=503, referrer_id=100, note_id=1, group_id=99)
+
+        async with bot_poll.aiosqlite.connect(bot_poll.DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO notes (id, owner_id, group_id, title, url) VALUES (?, ?, ?, ?, ?)",
+                (1, 100, 99, "Manager note", "@custom_manager"),
+            )
+            await db.commit()
+
+        send_message = AsyncMock()
+        fake_bot = MagicMock()
+        fake_bot.send_message = send_message
+
+        await bot_poll.send_manager_contact_to_chat(fake_bot, chat_id=999, user_id=503, skip_delay=True)
+
+        send_message.assert_awaited_once()
+        kwargs = send_message.await_args.kwargs
+        self.assertEqual(kwargs["chat_id"], 999)
+        self.assertIn("@custom_manager", kwargs["text"])
+        button = kwargs["reply_markup"].inline_keyboard[0][0]
+        self.assertEqual(button.text, "Написати менеджеру✅")
+        self.assertEqual(button.url, "https://t.me/custom_manager?text=%2B")
+
 
 if __name__ == "__main__":
     unittest.main()

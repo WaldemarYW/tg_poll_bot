@@ -1,10 +1,11 @@
 import asyncio
 import logging
 import os
+import re
 import sqlite3
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, F, types
@@ -78,9 +79,11 @@ CONTACT_WRITE_TEXT = "Написати"
 PHONE_CONTACT_TIMEOUT_SEC = 300
 DEFAULT_REMINDER_TEXT = (
     "Ти вже сьогодні зможеш, пройти навчання та отримати перші кошти, "
-    "навчання багато часу не займе - пиши менеджеру Володимиру👇\n"
+    "навчання багато часу не займе - пиши менеджеру👇\n"
     "@hr_volodymyr"
 )
+DEFAULT_MANAGER_USERNAME = "@hr_volodymyr"
+MANAGER_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{5,32}$")
 
 
 class PendingNoteCreationFilter(BaseFilter):
@@ -147,13 +150,13 @@ def build_start_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def build_manager_button() -> InlineKeyboardMarkup:
+def build_manager_button(manager_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Написати Володимиру✅",
-                    url="https://t.me/hr_volodymyr?text=%2B",
+                    text="Написати менеджеру✅",
+                    url=manager_url,
                 )
             ]
         ]
@@ -838,16 +841,19 @@ async def remove_contact_keyboard_to_chat(
 async def send_manager_contact_to_chat(
     bot: Bot,
     chat_id: int,
+    user_id: int,
     skip_delay: bool = False,
 ):
+    manager_username = await resolve_manager_username_for_user(user_id)
+    manager_url = build_manager_url(manager_username)
     await send_with_delay(
         bot.send_message,
         chat_id=chat_id,
         text=(
-            "Надаю вам контакт менеджера Володимира - @hr_volodymyr🧑🏻‍💻 "
+            f"Надаю вам контакт менеджера - {manager_username}🧑🏻‍💻 "
             "Відправ йому «+» і він розповість вам про роботу, та буде допомагати в подальшому!🚀"
         ),
-        reply_markup=build_manager_button(),
+        reply_markup=build_manager_button(manager_url),
         skip_delay=skip_delay,
     )
 
@@ -866,7 +872,7 @@ async def finalize_phone_contact_wait(
         await remove_contact_keyboard_to_chat(bot, chat_id, text=remove_keyboard_text)
     await notify_group_about_poll(bot, user_id)
     if send_manager:
-        await send_manager_contact_to_chat(bot, chat_id, skip_delay=True)
+        await send_manager_contact_to_chat(bot, chat_id, user_id, skip_delay=True)
 
 
 async def schedule_phone_contact_timeout(bot: Bot, user_id: int, chat_id: int):
@@ -904,13 +910,15 @@ async def schedule_reminder(bot: Bot, user_id: int, chat_id: int):
             if poll_row["device"] or poll_row["reminder_sent"]:
                 return
 
-            text = await get_reminder_text()
+            manager_username = await resolve_manager_username_for_user(user_id)
+            manager_url = build_manager_url(manager_username)
+            text = personalize_reminder_text(await get_reminder_text(), manager_username)
             remind_keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [
                         InlineKeyboardButton(
                             text="Написати менеджеру👨🏻‍💻",
-                            url="https://t.me/hr_volodymyr?text=%2B",
+                            url=manager_url,
                         )
                     ]
                 ]
@@ -964,6 +972,51 @@ def normalize_phone_number(raw: str) -> str:
     if cleaned.startswith("80"):
         return f"+3{cleaned}"
     return cleaned
+
+
+def normalize_manager_username(raw: Optional[str]) -> Optional[str]:
+    cleaned = (raw or "").strip()
+    if not cleaned:
+        return None
+
+    if cleaned.startswith("@"):
+        username = cleaned[1:]
+        return f"@{username}" if MANAGER_USERNAME_RE.fullmatch(username) else None
+
+    if cleaned.startswith("https://t.me/") or cleaned.startswith("http://t.me/"):
+        parsed = urlparse(cleaned)
+        candidate = parsed.path.strip("/").split("/", maxsplit=1)[0]
+        return f"@{candidate}" if MANAGER_USERNAME_RE.fullmatch(candidate) else None
+
+    if cleaned.startswith("tg://resolve"):
+        parsed = urlparse(cleaned)
+        query = parse_qs(parsed.query)
+        candidate = (query.get("domain") or [""])[0].strip()
+        return f"@{candidate}" if MANAGER_USERNAME_RE.fullmatch(candidate) else None
+
+    return f"@{cleaned}" if MANAGER_USERNAME_RE.fullmatch(cleaned) else None
+
+
+def build_manager_url(manager_username: str) -> str:
+    return f"https://t.me/{manager_username.lstrip('@')}?text=%2B"
+
+
+def personalize_reminder_text(text: str, manager_username: str) -> str:
+    return (
+        text.replace("менеджеру Володимиру", "менеджеру")
+        .replace(DEFAULT_MANAGER_USERNAME, manager_username)
+    )
+
+
+async def resolve_manager_username_for_user(user_id: int) -> str:
+    poll_row = await fetch_poll_response(user_id)
+    if poll_row and poll_row["note_id"]:
+        note_row = await fetch_note(poll_row["note_id"])
+        if note_row:
+            normalized = normalize_manager_username(note_row["url"])
+            if normalized:
+                return normalized
+    return DEFAULT_MANAGER_USERNAME
 
 
 def build_group_lead_message(
@@ -2039,6 +2092,7 @@ async def send_manager_contact(message: types.Message, skip_delay: bool = False)
     await send_manager_contact_to_chat(
         message.bot,
         message.chat.id,
+        message.from_user.id,
         skip_delay=skip_delay,
     )
 
