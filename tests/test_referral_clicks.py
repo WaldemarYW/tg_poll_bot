@@ -88,6 +88,8 @@ class TestReferralClicks(unittest.IsolatedAsyncioTestCase):
                 columns = [row[1] async for row in cursor]
 
         self.assertIn("phone_number", columns)
+        self.assertIn("stats_form_logged", columns)
+        self.assertIn("stats_manager_cta_logged", columns)
 
     async def test_finalize_phone_contact_wait_clears_waiter_and_timeout(self):
         bot_poll.set_phone_contact_waiter(777)
@@ -357,6 +359,80 @@ class TestReferralClicks(unittest.IsolatedAsyncioTestCase):
             777,
             222,
             skip_delay=True,
+        )
+
+    async def test_try_claim_form_stats_logged_is_atomic(self):
+        await bot_poll.ensure_poll_row(user_id=601, referrer_id=100, note_id=1, group_id=99)
+        await bot_poll.update_poll_response(user_id=601, device="Так, є")
+
+        first_claim = await bot_poll.try_claim_form_stats_logged(601)
+        second_claim = await bot_poll.try_claim_form_stats_logged(601)
+
+        self.assertTrue(first_claim)
+        self.assertFalse(second_claim)
+
+    async def test_try_claim_manager_cta_stats_logged_is_atomic(self):
+        await bot_poll.ensure_poll_row(user_id=602, referrer_id=100, note_id=1, group_id=99)
+        await bot_poll.update_poll_response(user_id=602, device="Так, є")
+
+        first_claim = await bot_poll.try_claim_manager_cta_stats_logged(602)
+        second_claim = await bot_poll.try_claim_manager_cta_stats_logged(602)
+
+        self.assertTrue(first_claim)
+        self.assertFalse(second_claim)
+
+    async def test_log_note_form_completion_stats_calls_sheets_logger(self):
+        await bot_poll.ensure_poll_row(user_id=603, referrer_id=100, note_id=1, group_id=99)
+        await bot_poll.update_poll_response(user_id=603, device="Так, є")
+
+        async with bot_poll.aiosqlite.connect(bot_poll.DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO notes (id, owner_id, group_id, title, url) VALUES (?, ?, ?, ?, ?)",
+                (1, 100, 99, "Campaign", "@manager"),
+            )
+            await db.execute(
+                "INSERT INTO groups (chat_id, title) VALUES (?, ?)",
+                (99, "Team A"),
+            )
+            await db.commit()
+
+        with patch.object(bot_poll.SHEETS_LOGGER, "increment_note_forms_count", new=AsyncMock()) as logger_mock:
+            await bot_poll.log_note_form_completion_stats(603)
+            await bot_poll.log_note_form_completion_stats(603)
+
+        logger_mock.assert_awaited_once_with(
+            group_id=99,
+            group_title="Team A",
+            note_id=1,
+            note_title="Campaign",
+            note_url="@manager",
+        )
+
+    async def test_log_note_manager_cta_stats_calls_sheets_logger(self):
+        await bot_poll.ensure_poll_row(user_id=604, referrer_id=100, note_id=1, group_id=99)
+        await bot_poll.update_poll_response(user_id=604, device="Так, є")
+
+        async with bot_poll.aiosqlite.connect(bot_poll.DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO notes (id, owner_id, group_id, title, url) VALUES (?, ?, ?, ?, ?)",
+                (1, 100, 99, "Campaign", "@manager"),
+            )
+            await db.execute(
+                "INSERT INTO groups (chat_id, title) VALUES (?, ?)",
+                (99, "Team A"),
+            )
+            await db.commit()
+
+        with patch.object(bot_poll.SHEETS_LOGGER, "increment_note_manager_cta_count", new=AsyncMock()) as logger_mock:
+            await bot_poll.log_note_manager_cta_stats(604)
+            await bot_poll.log_note_manager_cta_stats(604)
+
+        logger_mock.assert_awaited_once_with(
+            group_id=99,
+            group_title="Team A",
+            note_id=1,
+            note_title="Campaign",
+            note_url="@manager",
         )
 
 

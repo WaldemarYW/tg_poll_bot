@@ -250,6 +250,8 @@ async def init_db():
                 device TEXT,
                 notified INTEGER DEFAULT 0,
                 reminder_sent INTEGER DEFAULT 0,
+                stats_form_logged INTEGER DEFAULT 0,
+                stats_manager_cta_logged INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
@@ -346,6 +348,14 @@ async def init_db():
             pass
         try:
             await db.execute("ALTER TABLE poll_responses ADD COLUMN phone_number TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            await db.execute("ALTER TABLE poll_responses ADD COLUMN stats_form_logged INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            await db.execute("ALTER TABLE poll_responses ADD COLUMN stats_manager_cta_logged INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
         await db.execute(
@@ -799,6 +809,34 @@ async def mark_reminder_sent(user_id: int):
         await db.commit()
 
 
+async def try_claim_form_stats_logged(user_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            UPDATE poll_responses
+            SET stats_form_logged = 1
+            WHERE user_id = ? AND stats_form_logged = 0 AND device IS NOT NULL AND note_id IS NOT NULL
+            """,
+            (user_id,),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def try_claim_manager_cta_stats_logged(user_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            UPDATE poll_responses
+            SET stats_manager_cta_logged = 1
+            WHERE user_id = ? AND stats_manager_cta_logged = 0 AND device IS NOT NULL AND note_id IS NOT NULL
+            """,
+            (user_id,),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
 async def reset_reminder_sent(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -1165,6 +1203,56 @@ async def resolve_group_context(
             return referrer_group[0], referrer_group[1]
 
     return group_id, None
+
+
+async def log_note_form_completion_stats(user_id: int) -> None:
+    if not await try_claim_form_stats_logged(user_id):
+        return
+
+    poll_row = await fetch_poll_response(user_id)
+    if not poll_row or not poll_row["note_id"]:
+        return
+
+    note_row = await fetch_note(poll_row["note_id"])
+    if not note_row:
+        return
+
+    resolved_group_id, resolved_group_title = await resolve_group_context(
+        group_id=poll_row["group_id"],
+        referrer_id=poll_row["referrer_id"],
+    )
+    await SHEETS_LOGGER.increment_note_forms_count(
+        group_id=resolved_group_id,
+        group_title=resolved_group_title,
+        note_id=poll_row["note_id"],
+        note_title=note_row["title"] or NO_NOTE_KEY,
+        note_url=note_row["url"] or "",
+    )
+
+
+async def log_note_manager_cta_stats(user_id: int) -> None:
+    if not await try_claim_manager_cta_stats_logged(user_id):
+        return
+
+    poll_row = await fetch_poll_response(user_id)
+    if not poll_row or not poll_row["note_id"]:
+        return
+
+    note_row = await fetch_note(poll_row["note_id"])
+    if not note_row:
+        return
+
+    resolved_group_id, resolved_group_title = await resolve_group_context(
+        group_id=poll_row["group_id"],
+        referrer_id=poll_row["referrer_id"],
+    )
+    await SHEETS_LOGGER.increment_note_manager_cta_count(
+        group_id=resolved_group_id,
+        group_title=resolved_group_title,
+        note_id=poll_row["note_id"],
+        note_title=note_row["title"] or NO_NOTE_KEY,
+        note_url=note_row["url"] or "",
+    )
 
 
 def extract_start_payload(message: types.Message) -> Optional[str]:
@@ -1687,6 +1775,7 @@ async def handle_device_choice(callback: types.CallbackQuery):
     await update_poll_response(callback.from_user.id, device=selection)
     cancel_reminder_task(callback.from_user.id)
     await mark_reminder_sent(callback.from_user.id)
+    await log_note_form_completion_stats(callback.from_user.id)
 
     if callback.data == "poll_device_no":
         await send_with_delay(
@@ -1725,6 +1814,7 @@ async def handle_device_choice(callback: types.CallbackQuery):
 
 async def handle_manager_prompt(callback: types.CallbackQuery):
     await upsert_user(callback.from_user)
+    await log_note_manager_cta_stats(callback.from_user.id)
     if callback.from_user.id in PHONE_CONTACT_WAITERS:
         await finalize_phone_contact_wait(
             bot=callback.message.bot,
@@ -1775,6 +1865,7 @@ async def handle_phone_contact_text(message: types.Message):
         return
 
     if text == CONTACT_WRITE_TEXT:
+        await log_note_manager_cta_stats(message.from_user.id)
         await finalize_phone_contact_wait(
             bot=message.bot,
             user_id=message.from_user.id,

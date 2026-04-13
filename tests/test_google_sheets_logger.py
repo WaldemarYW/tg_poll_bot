@@ -95,9 +95,9 @@ class TestGoogleSheetsLogger(unittest.TestCase):
 
     def test_find_first_free_stats_row_uses_abc_only(self):
         rows = [
-            ["Назва реклами", "id", "Посилання", "Кількість переходів"],
-            ["ad-1", "101", "https://a", "3", "x", "y"],
-            ["", "", "", "", "occupied-e"],
+            ["Назва реклами", "id", "Посилання", "Кількість переходів", "Кількість анкет", "Кількість звернень до менеджера"],
+            ["ad-1", "101", "https://a", "3", "0", "0", "x", "y"],
+            ["", "", "", "", "", "", "occupied-g"],
             ["ad-2", "102", "https://b", "1"],
         ]
         idx = SheetsReferralLogger._find_first_free_stats_row(rows)
@@ -149,6 +149,56 @@ class TestGoogleSheetsLoggerAsync(unittest.IsolatedAsyncioTestCase):
             phone_number="+380991112233",
         )
         logger._update_referral_phone_number_sync.assert_called_once()
+
+    async def test_increment_note_forms_count_calls_sync_helper(self):
+        logger = SheetsReferralLogger(
+            enabled=True,
+            spreadsheet_id="sheet-id",
+            service_account_json="/tmp/fake.json",
+            timeout_sec=1,
+        )
+        logger._increment_note_metric_sync = MagicMock()
+
+        await logger.increment_note_forms_count(
+            group_id=1,
+            group_title="Team A",
+            note_id=30,
+            note_title="Campaign",
+            note_url="@manager",
+        )
+        logger._increment_note_metric_sync.assert_called_once_with(
+            1,
+            "Team A",
+            30,
+            "Campaign",
+            "@manager",
+            5,
+        )
+
+    async def test_increment_note_manager_cta_count_calls_sync_helper(self):
+        logger = SheetsReferralLogger(
+            enabled=True,
+            spreadsheet_id="sheet-id",
+            service_account_json="/tmp/fake.json",
+            timeout_sec=1,
+        )
+        logger._increment_note_metric_sync = MagicMock()
+
+        await logger.increment_note_manager_cta_count(
+            group_id=1,
+            group_title="Team A",
+            note_id=30,
+            note_title="Campaign",
+            note_url="@manager",
+        )
+        logger._increment_note_metric_sync.assert_called_once_with(
+            1,
+            "Team A",
+            30,
+            "Campaign",
+            "@manager",
+            6,
+        )
 
 
 if __name__ == "__main__":

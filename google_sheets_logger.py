@@ -31,6 +31,8 @@ STATS_HEADERS = [
     "id",
     "Посилання",
     "Кількість переходів",
+    "Кількість анкет",
+    "Кількість звернень до менеджера",
 ]
 
 
@@ -240,6 +242,82 @@ class SheetsReferralLogger:
                 exc,
             )
 
+    async def increment_note_forms_count(
+        self,
+        *,
+        group_id: Optional[int],
+        group_title: Optional[str],
+        note_id: int,
+        note_title: str,
+        note_url: str,
+    ) -> None:
+        await self._increment_note_metric(
+            group_id=group_id,
+            group_title=group_title,
+            note_id=note_id,
+            note_title=note_title,
+            note_url=note_url,
+            metric_col_idx=5,
+            metric_log_name="forms",
+        )
+
+    async def increment_note_manager_cta_count(
+        self,
+        *,
+        group_id: Optional[int],
+        group_title: Optional[str],
+        note_id: int,
+        note_title: str,
+        note_url: str,
+    ) -> None:
+        await self._increment_note_metric(
+            group_id=group_id,
+            group_title=group_title,
+            note_id=note_id,
+            note_title=note_title,
+            note_url=note_url,
+            metric_col_idx=6,
+            metric_log_name="manager_cta",
+        )
+
+    async def _increment_note_metric(
+        self,
+        *,
+        group_id: Optional[int],
+        group_title: Optional[str],
+        note_id: int,
+        note_title: str,
+        note_url: str,
+        metric_col_idx: int,
+        metric_log_name: str,
+    ) -> None:
+        if not self.enabled:
+            return
+        if not self.spreadsheet_id or not self.service_account_json:
+            return
+        try:
+            async with self._lock:
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._increment_note_metric_sync,
+                        group_id,
+                        group_title,
+                        note_id,
+                        note_title,
+                        note_url,
+                        metric_col_idx,
+                    ),
+                    timeout=self.timeout_sec,
+                )
+        except Exception as exc:
+            self.logger.error(
+                "Failed to increment %s in stats sheet (group_id=%s note_id=%s): %s",
+                metric_log_name,
+                group_id,
+                note_id,
+                exc,
+            )
+
     def _append_row_sync(self, sheet_name: str, row: List[str]) -> None:
         spreadsheet = self._get_spreadsheet_sync()
         worksheet = self._get_or_create_worksheet_sync(spreadsheet, sheet_name)
@@ -373,8 +451,8 @@ class SheetsReferralLogger:
 
         target_row = self._find_first_free_stats_row(rows)
         worksheet.update(
-            f"A{target_row}:D{target_row}",
-            [[note_title, note_id_str, note_url, 1]],
+            f"A{target_row}:F{target_row}",
+            [[note_title, note_id_str, note_url, 1, 0, 0]],
             value_input_option="USER_ENTERED",
         )
 
@@ -415,17 +493,60 @@ class SheetsReferralLogger:
 
         target_row = self._find_first_free_stats_row(rows)
         worksheet.update(
-            f"A{target_row}:D{target_row}",
-            [[title_clean, note_id_str, url_clean, 0]],
+            f"A{target_row}:F{target_row}",
+            [[title_clean, note_id_str, url_clean, 0, 0, 0]],
             value_input_option="USER_ENTERED",
         )
         if link_clean:
             worksheet.update_cell(target_row, REF_LINK_COL_IDX, link_clean)
 
+    def _increment_note_metric_sync(
+        self,
+        group_id: Optional[int],
+        group_title: Optional[str],
+        note_id: int,
+        note_title: str,
+        note_url: str,
+        metric_col_idx: int,
+    ) -> None:
+        spreadsheet = self._get_spreadsheet_sync()
+        stats_sheet_name = sanitize_stats_sheet_name(group_id, group_title)
+        worksheet = self._get_or_create_stats_worksheet_sync(spreadsheet, stats_sheet_name)
+        self._ensure_stats_headers_sync(worksheet)
+
+        note_id_str = str(note_id)
+        title_clean = (note_title or "").strip() or NO_NOTE_KEY
+        url_clean = (note_url or "").strip()
+        rows = worksheet.get_all_values()
+
+        for idx, row in enumerate(rows[1:], start=2):
+            existing_id = row[1].strip() if len(row) > 1 else ""
+            if existing_id == note_id_str:
+                current_value_raw = row[metric_col_idx - 1].strip() if len(row) >= metric_col_idx else "0"
+                try:
+                    current_value = int(current_value_raw)
+                except ValueError:
+                    current_value = 0
+                worksheet.update(
+                    f"{self._column_letter(metric_col_idx)}{idx}",
+                    [[current_value + 1]],
+                    value_input_option="USER_ENTERED",
+                )
+                return
+
+        target_row = self._find_first_free_stats_row(rows)
+        base_row = [title_clean, note_id_str, url_clean, 0, 0, 0]
+        base_row[metric_col_idx - 1] = 1
+        worksheet.update(
+            f"A{target_row}:F{target_row}",
+            [base_row],
+            value_input_option="USER_ENTERED",
+        )
+
     @staticmethod
     def _find_first_free_stats_row(rows: List[List[str]]) -> int:
         """
-        Find first row (starting from 2) where A/B/C/D are all empty, ignoring
+        Find first row (starting from 2) where A:F are all empty, ignoring
         any data in columns E+.
         """
         if len(rows) <= 1:
@@ -436,7 +557,9 @@ class SheetsReferralLogger:
             col_b = row[1].strip() if len(row) > 1 else ""
             col_c = row[2].strip() if len(row) > 2 else ""
             col_d = row[3].strip() if len(row) > 3 else ""
-            if not col_a and not col_b and not col_c and not col_d:
+            col_e = row[4].strip() if len(row) > 4 else ""
+            col_f = row[5].strip() if len(row) > 5 else ""
+            if not col_a and not col_b and not col_c and not col_d and not col_e and not col_f:
                 return idx
 
         return len(rows) + 1
