@@ -9,7 +9,7 @@ NO_NOTE_KEY = "__NO_NOTE__"
 INVALID_SHEET_CHARS_RE = re.compile(r"[\[\]:*?/\\]")
 MAX_SHEET_NAME_LEN = 95
 STATS_SUFFIX = "[Статистика]"
-REF_LINK_COL_IDX = 16  # Column P
+REF_LINK_COL_IDX = 12  # Column L
 
 HEADERS = [
     "назва_примітки",
